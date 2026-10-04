@@ -230,3 +230,31 @@ def test_main_calls_configure_app_icon(monkeypatch):
     with pytest.raises(SystemExit):
         main_module.main()
     assert len(calls) == 1
+
+
+def test_on_palette_changed_slot_arity(qapp, monkeypatch):
+    manager = SystemTrayManager()
+    calls = []
+    monkeypatch.setattr(
+        system_tray, "tray_icon", lambda app=None: calls.append(app) or QIcon()
+    )
+
+    manager._on_palette_changed()
+    manager._on_palette_changed(QPalette())
+
+    assert len(calls) == 2
+
+
+def test_standard_icon_fallback_when_tray_icon_null(qapp, monkeypatch):
+    manager = SystemTrayManager()
+    monkeypatch.setattr(system_tray, "tray_icon", lambda app=None: QIcon())
+
+    manager._apply_icon()
+
+    expected = qapp.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
+    assert not expected.isNull()
+    installed = manager._tray_icon.icon()
+    assert not installed.isNull()
+    # Pin the identity of the fallback, not merely that some icon is present:
+    # any other standard icon would satisfy a bare non-null check.
+    assert installed.pixmap(22, 22).toImage() == expected.pixmap(22, 22).toImage()
