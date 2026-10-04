@@ -60,20 +60,25 @@ def hub_svg(main: str, sat: str) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
-def hub_svg_symbolic(glyph: str, halo: str) -> bytes:
-    """Two-tone symbolic asset: halo layer under the glyph layer."""
+def hub_svg_symbolic(glyph: str, halo: str | None) -> bytes:
+    """Two-tone symbolic asset: halo layer under the glyph layer.
+
+    ``halo=None`` omits the halo layer entirely and produces the control render
+    that demonstrates why the halo is required on a mismatched panel.
+    """
     lines = [
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">',
-        # halo layer, expanded by HALO on every edge
-        f'<g stroke="{halo}" stroke-width="{STROKE + 2 * HALO}" stroke-linecap="round">',
     ]
-    for x, y in _SATELLITES:
-        lines.append(f'<line x1="12" y1="{_CY}" x2="{x:.2f}" y2="{y:.2f}"/>')
-    lines.append("</g>")
-    lines.append(f'<g fill="{halo}">')
-    for x, y in _SATELLITES:
-        lines.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{SAT + HALO}"/>')
-    lines.append(f'<circle cx="12" cy="{_CY}" r="{HUB + HALO}"/></g>')
+    if halo is not None:
+        # halo layer, expanded by HALO on every edge
+        lines.append(f'<g stroke="{halo}" stroke-width="{STROKE + 2 * HALO}" stroke-linecap="round">')
+        for x, y in _SATELLITES:
+            lines.append(f'<line x1="12" y1="{_CY}" x2="{x:.2f}" y2="{y:.2f}"/>')
+        lines.append("</g>")
+        lines.append(f'<g fill="{halo}">')
+        for x, y in _SATELLITES:
+            lines.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="{SAT + HALO}"/>')
+        lines.append(f'<circle cx="12" cy="{_CY}" r="{HUB + HALO}"/></g>')
     # glyph layer
     lines.append(f'<g stroke="{glyph}" stroke-width="{STROKE}" stroke-linecap="round">')
     for x, y in _SATELLITES:
@@ -132,6 +137,7 @@ def main() -> None:
     app = QApplication([])
     color = hub_svg(COLOR_MAIN, COLOR_SAT)
     symbolic = hub_svg_symbolic(GLYPH, HALO_COLOR)
+    no_halo = hub_svg_symbolic(GLYPH, None)
 
     # Prove the halo actually keeps the glyph legible on a same-colour panel.
     # Without the halo layer this assertion fails, which is its whole point.
@@ -143,12 +149,21 @@ def main() -> None:
         for i in range(0, len(rgb), 3)
     )
     assert max_delta > 150, f"halo did not separate glyph from panel (delta={max_delta})"
+    # The control must FAIL the same separation test; otherwise the assertion
+    # above proves nothing about the halo.
+    ctl = render(no_halo, 22, bg=(28, 28, 28)).convert("RGB").tobytes()
+    ctl_delta = max(
+        max(abs(ctl[i] - panel[0]), abs(ctl[i + 1] - panel[1]), abs(ctl[i + 2] - panel[2]))
+        for i in range(0, len(ctl), 3)
+    )
+    assert ctl_delta < 40, f"without-halo control unexpectedly separated (delta={ctl_delta})"
 
     rows = [
         ("colour - light panel", color, LIGHT),
         ("colour - dark panel", color, DARK),
         ("symbolic glyph+halo - light panel", symbolic, LIGHT),
         ("symbolic glyph+halo - dark panel (halo carries it)", symbolic, DARK),
+        ("CONTROL: symbolic without halo - dark panel", no_halo, DARK),
     ]
 
     f, f_bold = _font(12), _font(13, bold=True)

@@ -87,11 +87,14 @@ at radius `7.1` from the hub. Constants: `HUB=3.5`, `SAT=2.0`, `STROKE=1.5`,
 
 The hub is deliberately offset downward by `1.5` so the *bounding box*
 (`y 4.4 … 19.05`) is optically centred in the square canvas. Glyph geometry stays
-within a 2px margin; the halo layer reaches `y 3.6 … 19.85` and `x 3.85 … 20.15`,
+within a 2px margin. The halo layer reaches `y 3.6 … 19.85` and
+`x 3.05 … 20.95` (driven by the satellite halos at radius `SAT + HALO = 2.8`),
 still inside the 24px canvas.
 
 Verified raster output at 16/22/32/48/64/128px on light (`#f0f0f0`) and dark
-(`#18181f`) panels, with and without the halo. Reproduce with
+(`#18181f`) panels, for the colour asset, the two-tone symbolic asset, and a
+without-halo symbolic control row that shows the glyph disappearing into the
+dark panel. Reproduce with
 `docs/superpowers/specs/mockups/generate_icon_preview.py`, which writes
 `docs/superpowers/specs/mockups/app_icon_preview.png` (side-by-side with the
 current `SP_ComputerIcon` fallback). Rejected variants (recorded for future
@@ -194,10 +197,19 @@ def color_icon() -> QIcon: ...
 def symbolic_icon(glyph: QColor, halo: QColor) -> QIcon: ...
 def tray_colors(palette: QPalette) -> tuple[QColor, QColor]: ...
 def tray_icon(app: QApplication | None = None) -> QIcon: ...
+def configure_app_icon(app: QApplication) -> None: ...
 ```
 
+The module imports the resources package **as a module** — `from
+ai_manager.resources import assets` — and calls `assets.asset_bytes(...)` /
+`assets.asset_path(...)` at call time. It must **not** bind the names directly
+(`from ai_manager.resources.assets import asset_bytes`), because section 7
+monkeypatches `ai_manager.resources.assets.asset_bytes` to exercise the missing-
+and malformed-asset paths; a direct-name import would make those two tests pass
+vacuously.
+
 - `_render(kind, px, device_pixel_ratio, glyph, halo) -> QPixmap | None`:
-  1. `data = asset_bytes(kind)`; return `None` if `data is None`.
+  1. `data = assets.asset_bytes(kind)`; return `None` if `data is None`.
   2. For `"symbolic"`, substitute `b"__HALO__"` and `b"__GLYPH__"` with the
      `#rrggbb` byte form of `halo`/`glyph`. A symbolic render with either colour
      omitted is a programming error and raises `ValueError`.
@@ -232,6 +244,8 @@ def tray_icon(app: QApplication | None = None) -> QIcon: ...
   |---|---|
   | not `None` | `symbolic_icon(*tray_colors(app.palette()))` |
   | `None`     | a null `QIcon` (no palette exists, and no `QPixmap` may be built) |
+- `configure_app_icon(app)` calls `app.setWindowIcon(color_icon())`. It exists so
+  `main.py` has a one-line, unit-testable entry point for section 4.1.
 
 ### 3.3 Packaging
 
@@ -248,11 +262,17 @@ ai_manager = ["resources/icons/*.svg"]
 
 ### 4.1 `src/ai_manager/main.py`
 
-Call `app.setWindowIcon(color_icon())` immediately after the `QApplication` is
-constructed. This covers the window titlebar and the taskbar icon. It does
-**not** establish the launcher↔window grouping association — `main.py` already
-calls `app.setDesktopFileName("ai-manager")`, and `StartupWMClass=ai-manager`
-in the `.desktop` entry is what handles that.
+Call `configure_app_icon(app)` immediately after the `QApplication` is
+constructed (`main.py` keeps the `QApplication` construction as-is; the helper
+performs the `setWindowIcon` call). This covers the window titlebar and the
+taskbar icon.
+
+It does **not** establish launcher↔window grouping. `main.py` already calls
+`app.setDesktopFileName("ai-manager")`, and on KDE X11 the reliable grouping
+mechanism is the `_KDE_NET_WM_DESKTOP_FILE` window property that call sets.
+`StartupWMClass=ai-manager` in the `.desktop` entry only matches if the window's
+actual `WM_CLASS` equals `ai-manager`, which is **not** established here and is
+not relied upon.
 
 ### 4.2 `src/ai_manager/ui/system_tray.py`
 
@@ -321,8 +341,11 @@ ai_manager/resources/icons/*.svg
 - `asset_bytes`/`asset_path` return `None` rather than raising, so
   `generate_desktop_entry()`/`install_desktop_shortcut()` cannot fail because an
   asset is missing; the entry falls back to a valid theme icon name.
-- An unknown `kind` raises `ValueError` — the one deliberate hard failure, so a
-  typo surfaces in tests instead of silently producing a null icon.
+- There are exactly two deliberate hard failures, both chosen so a programming
+  error surfaces in tests rather than silently degrading to a null icon: an
+  unknown `kind` in `assets.asset_bytes`/`assets.asset_path`, and a symbolic
+  render with either colour omitted (`_render` raises `ValueError`). Both are
+  covered by section 7.
 - `paletteChanged` is connected only when a `QApplication` exists, and the slot
   is safe to call with or without a palette argument.
 
@@ -337,11 +360,16 @@ New `tests/test_icons.py`, headless via the existing
    `availableSizes()` contains `16`, `22` and `256`.
 3. **Falsifiable tint test.** Render `symbolic_icon(QColor("#dd2222"),
    QColor("#22dd22"))` at 22px and assert: the corner pixel `(0, 0)` is
-   transparent; the count of fully opaque pixels is between 15% and 60% of the
-   canvas (so a solid square fails); and no opaque pixel is `#000000` or any
-   colour other than the two tokens. This fails on the source/destination
-   inversion bug (which leaves `#000000`), on a `SourceOver` fill (100%
-   coverage), and on a dropped tint.
+   transparent; the count of fully opaque pixels is between **10% and 60%** of
+   the canvas (a `SourceOver` fill is 100% and fails); at least one fully opaque
+   pixel has `red > 150` (the glyph layer rendered); and **every** fully opaque
+   pixel lies on the glyph→halo segment, i.e. `blue == 34` and
+   `red + green == 255`, each within a tolerance of 3. A dropped or inverted
+   tint leaves `#000000` pixels, which are not on that segment and fail the
+   assertion. The shipped reference render measures 76/484 opaque pixels
+   (15.7%), 34 of them pure glyph, 0 pure halo, 0 black, and 0 off-segment. The
+   segment form is required because the glyph is composited over an opaque halo,
+   so antialiased edges are blends of the two tokens, never a third colour.
 4. **Falsifiable halo test.** Render the symbolic icon with glyph `#1c1c1c` and
    halo `#ffffff` over a `#1c1c1c` panel and assert at least one pixel has
    contrast ratio `> 4.5` against the panel. This fails if the halo layer is
@@ -352,15 +380,31 @@ New `tests/test_icons.py`, headless via the existing
    returns opposite-luminance glyph/halo. Palettes are constructed directly.
 6. `asset_path("color")` and `asset_path("symbolic")` return existing files;
    `asset_path("bogus")` raises `ValueError`.
-7. Missing-asset path: monkeypatch `assets.asset_bytes` to return `None` and
-   assert `color_icon().isNull()` and `symbolic_icon(...).isNull()`, with no
+7. Missing-asset path: monkeypatch `ai_manager.resources.assets.asset_bytes` to
+   return `None` and assert `color_icon().isNull()` and
+   `symbolic_icon(QColor("#000000"), QColor("#ffffff")).isNull()`, with no
    exception.
-8. Malformed asset: monkeypatch `assets.asset_bytes` to return
-   `b"<svg"` and assert a null icon, not a raise.
+8. Malformed asset: monkeypatch `ai_manager.resources.assets.asset_bytes` to
+   return `b"<svg"` and assert a null icon, not a raise.
 9. **No-application test.** Run `sys.executable -c "..."` in a subprocess with
    no `QApplication`, importing `ai_manager.ui.icons` and calling
    `color_icon()` and `tray_icon(None)`. Assert exit code `0` and that both
    report `isNull()`. This is the regression test for the `QPixmap` abort.
+10. **Device-pixel-ratio test.** `color_icon()` queried as
+    `pixmap(QSize(22, 22), 2.0)` returns a pixmap whose `devicePixelRatio()` is
+    `2.0` and whose `width()` is `44`; the ratio-`1.0` query returns `22`. This is
+    the only coverage of the `DEVICE_PIXEL_RATIOS` feature.
+11. **Slot-arity test.** `SystemTrayManager._on_palette_changed()` is callable
+    with no argument and with a `QPalette` argument, and re-applies the icon in
+    both cases.
+12. **Standard-icon fallback test.** Monkeypatch
+    `ai_manager.ui.system_tray.tray_icon` to return a null `QIcon`; after
+    `_apply_icon()` the tray icon is the non-null
+    `QStyle.StandardPixmap.SP_ComputerIcon`.
+13. **Window-icon wiring test.** `configure_app_icon(qapp)` leaves
+    `qapp.windowIcon()` non-null, and `main.py` calls it (section 4.1).
+14. **Symbolic arity test.** `_render` with a symbolic kind and either colour
+    set to `None` raises `ValueError` (section 6).
 
 Additions to existing tests:
 
@@ -416,8 +460,20 @@ Revision 1 findings and where they are resolved.
 | m1 stale existing assertion | §7 explicitly replaces `tests/test_desktop_integration.py:86` |
 | m2 `icon_path` unguarded | §3.1 returns `None`; §4.3 falls back to `applications-development` |
 | m3 DPR + SVG profile limits | §1.1 records the Tiny 1.2 limit; §3.2 adds `DEVICE_PIXEL_RATIOS`; §3.2/§8 document fixed-size scaling |
-| m4 StartupWMClass wording | §4.1 corrected; grouping is attributed to `setDesktopFileName` |
+| m4 StartupWMClass wording | §4.1 corrected to state the real mechanism; `StartupWMClass` is explicitly not relied upon |
 | m5 pyproject metadata defect | §8 records it as pre-existing and explicitly out of scope |
 | m6 missing tests | §7 items 7, 8, 9 and the `tray_colors` guard case in item 5 |
 | m7 `tray_icon`/`kind` ambiguity | §3.2 branch table; §3.1 unknown `kind` raises `ValueError` |
 | m8 `Icon=` install identity | §5 and §8 record the same-install and worktree-lifetime assumptions |
+
+### 9.1 Revision 2 findings
+
+| Finding | Resolution |
+|---|---|
+| N1 §7.3 tint test unsatisfiable (glyph-over-halo blends are a third colour) | §7.3 rewritten to assert every opaque pixel lies on the glyph→halo segment; verified against a reference render (76 opaque, 0 off-segment) |
+| N2 §7.7/§7.8 monkeypatch target contradicted the import style | §3.2 mandates module-qualified `assets.asset_bytes(...)` access and forbids direct-name binding |
+| n1 halo x-extent mis-stated | §2.1 corrected to `x 3.05 … 20.95` (satellite halos `r 2.8`), matching the constants |
+| n2 §4.1/§9 grouping contradiction | §4.1 states the actual mechanism (`_KDE_NET_WM_DESKTOP_FILE` via `setDesktopFileName`) and that `StartupWMClass` is not relied upon |
+| n3 "one deliberate hard failure" wrong | §6 states both `ValueError` cases; §7.14 tests the symbolic one |
+| n4 "with and without the halo" not reproducible | §2.1 reworded; the generator now emits a without-halo control row |
+| n5 untested DPR / window icon / fallback / slot arity | §7 items 10–13 added |
