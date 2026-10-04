@@ -12,7 +12,7 @@ This plan describes the discrete tasks required to implement system tray support
 ---
 
 ## Task 1: Extend UserSettings Model and Tests
-**Implementer tier:** frontier
+**Implementer tier:** Frontier
 
 Extend `UserSettings` in `src/ai_manager/config/models.py` with the new configuration fields and default values, and add serialization unit tests.
 
@@ -48,7 +48,7 @@ git commit -m "feat(config): extend UserSettings with tray and autostart fields"
 ---
 
 ## Task 2: Implement DesktopIntegrationService and Tests
-**Implementer tier:** frontier
+**Implementer tier:** Frontier
 
 Implement `DesktopIntegrationService` in `src/ai_manager/services/desktop_integration.py` for generating, installing, and removing `.desktop` files in `~/.local/share/applications` and `~/.config/autostart`.
 
@@ -83,7 +83,7 @@ git commit -m "feat(services): implement DesktopIntegrationService for shortcut 
 ---
 
 ## Task 3: SupervisorManager Batch Service Controls
-**Implementer tier:** frontier
+**Implementer tier:** Frontier
 
 Extend `SupervisorManager` in `src/ai_manager/services/supervisor.py` with `stop_supervisor()` to complement `start_supervisor()`, enabling tray menu batch start/stop actions.
 
@@ -109,7 +109,7 @@ git commit -m "feat(supervisor): add stop_supervisor command"
 ---
 
 ## Task 4: Implement SystemTrayManager Component and Tests
-**Implementer tier:** frontier
+**Implementer tier:** Frontier
 
 Implement `SystemTrayManager` wrapping `QSystemTrayIcon` with left-click toggle, context menu, and balloon notification support.
 
@@ -137,7 +137,7 @@ git commit -m "feat(ui): implement SystemTrayManager component"
 ---
 
 ## Task 5: Implement SettingsDialog Component and Tests
-**Implementer tier:** frontier
+**Implementer tier:** Frontier
 
 Implement the modal `SettingsDialog` in `src/ai_manager/ui/settings_dialog.py` for configuring system integration, shortcut installation, and application preferences.
 
@@ -169,7 +169,7 @@ git commit -m "feat(ui): implement SettingsDialog component"
 ---
 
 ## Task 6: Integrate System Tray and Settings into MainWindow
-**Implementer tier:** frontier
+**Implementer tier:** Frontier
 
 Integrate `SystemTrayManager`, `SettingsDialog`, and `DesktopIntegrationService` into `MainWindow`, including toolbar action, close-to-tray handling, live preference updates, and clean application exit.
 
@@ -206,7 +206,7 @@ git commit -m "feat(ui): integrate system tray, settings dialog, and close-to-tr
 ---
 
 ## Task 7: CLI Arguments and Startup Integration in main.py
-**Implementer tier:** frontier
+**Implementer tier:** Frontier
 
 Update `src/ai_manager/main.py` with CLI argument parsing (`--minimized` / `--tray`), `setQuitOnLastWindowClosed(False)`, `setDesktopFileName("ai-manager")`, and start-minimized handling.
 
