@@ -1,0 +1,25 @@
+digraph app_icon_execution_graph {
+    rankdir=TB;
+    node [shape=box, style=rounded, fontname="Helvetica"];
+    label="topic: app-icon   lane: icon-pipeline (sequential)";
+    labelloc=t;
+
+    task_1 [label="Task 1: Package the icon assets and the Qt-free asset accessor\ntier: fast"];
+    task_2 [label="Task 2: Render colour and symbolic icons with QSvgRenderer\ntier: standard"];
+    task_3 [label="Task 3: Install the colour icon as the application window icon\ntier: standard"];
+    task_4 [label="Task 4: Palette-tinted tray icon with re-tint on palette change\ntier: standard"];
+    task_5 [label="Task 5: Point the .desktop entry at the colour asset\ntier: standard"];
+    task_6 [label="Task 6: Declare package data and run the full suite\ntier: fast"];
+
+    task_1 -> task_2;
+    task_2 -> task_3;
+    task_3 -> task_4;
+    task_2 -> task_4;
+    task_4 -> task_5;
+    task_1 -> task_5;
+    task_5 -> task_6;
+    task_1 -> task_6;
+    task_2 -> task_6;
+    task_3 -> task_6;
+    task_4 -> task_6;
+}

@@ -1,0 +1,207 @@
+schema_version: 1
+topic: app-icon
+source_plan:
+  path: docs/superpowers/plans/2026-10-04-app-icon.md
+  sha256: 62facffa2d9d32203e3589ae62666c2e75cd7d3860d3b7b937c959ba4754f6c1
+
+lanes:
+  - id: icon-pipeline
+    name: Icon Pipeline Lane
+    task_ids:
+      - task-1
+      - task-2
+      - task-3
+      - task-4
+      - task-5
+      - task-6
+
+tasks:
+  - id: task-1
+    plan_task: 1
+    lane: icon-pipeline
+    sequence: 1
+    title: Package the icon assets and the Qt-free asset accessor
+    tier: fast
+    depends_on:
+      []
+    ownership:
+      - "src/ai_manager/resources/**"
+      - "tests/test_icons.py"
+    resources: []
+    produces:
+      - interface: asset_bytes
+        signature: "asset_bytes(kind: str) -> bytes | None"
+        signature_digest: b147a4d2b54f933f
+      - interface: asset_path
+        signature: "asset_path(kind: str) -> Path | None"
+        signature_digest: 8cae5cd923542881
+    consumes:
+      []
+    validation:
+      - argv:
+          - "/home/henry/anaconda3/envs/daily/bin/python"
+          - "-m"
+          - "pytest"
+          - "tests/test_icons.py"
+          - "-q"
+
+  - id: task-2
+    plan_task: 2
+    lane: icon-pipeline
+    sequence: 2
+    title: Render colour and symbolic icons with QSvgRenderer
+    tier: standard
+    depends_on:
+      - task-1
+    ownership:
+      - "src/ai_manager/ui/icons.py"
+      - "tests/test_icons.py"
+    resources: []
+    produces:
+      - interface: color_icon
+        signature: "color_icon() -> QIcon"
+        signature_digest: 95ddff2fed10efeb
+      - interface: symbolic_icon
+        signature: "symbolic_icon(glyph: QColor, halo: QColor) -> QIcon"
+        signature_digest: 5d8acff1fce6d3de
+      - interface: tray_colors
+        signature: "tray_colors(palette: QPalette) -> tuple[QColor, QColor]"
+        signature_digest: ff213691a33e960a
+      - interface: tray_icon
+        signature: "tray_icon(app: QApplication | None = None) -> QIcon"
+        signature_digest: caa095e778230b4e
+      - interface: configure_app_icon
+        signature: "configure_app_icon(app: QApplication) -> None"
+        signature_digest: 9aeffe3a70dfc896
+    consumes:
+      - interface: asset_bytes
+        from_task: task-1
+        signature: "asset_bytes(kind: str) -> bytes | None"
+        signature_digest: b147a4d2b54f933f
+    validation:
+      - argv:
+          - "/home/henry/anaconda3/envs/daily/bin/python"
+          - "-m"
+          - "pytest"
+          - "tests/test_icons.py"
+          - "-q"
+
+  - id: task-3
+    plan_task: 3
+    lane: icon-pipeline
+    sequence: 3
+    title: Install the colour icon as the application window icon
+    tier: standard
+    depends_on:
+      - task-2
+    ownership:
+      - "src/ai_manager/main.py"
+      - "tests/test_icons.py"
+    resources: []
+    produces:
+      []
+    consumes:
+      - interface: configure_app_icon
+        from_task: task-2
+        signature: "configure_app_icon(app: QApplication) -> None"
+        signature_digest: 9aeffe3a70dfc896
+      - interface: color_icon
+        from_task: task-2
+        signature: "color_icon() -> QIcon"
+        signature_digest: 95ddff2fed10efeb
+    validation:
+      - argv:
+          - "/home/henry/anaconda3/envs/daily/bin/python"
+          - "-m"
+          - "pytest"
+          - "tests/test_icons.py"
+          - "-q"
+
+  - id: task-4
+    plan_task: 4
+    lane: icon-pipeline
+    sequence: 4
+    title: Palette-tinted tray icon with re-tint on palette change
+    tier: standard
+    depends_on:
+      - task-3
+      - task-2
+    ownership:
+      - "src/ai_manager/ui/system_tray.py"
+      - "tests/test_icons.py"
+      - "tests/test_system_tray.py"
+    resources: []
+    produces:
+      []
+    consumes:
+      - interface: tray_icon
+        from_task: task-2
+        signature: "tray_icon(app: QApplication | None = None) -> QIcon"
+        signature_digest: caa095e778230b4e
+      - interface: tray_colors
+        from_task: task-2
+        signature: "tray_colors(palette: QPalette) -> tuple[QColor, QColor]"
+        signature_digest: ff213691a33e960a
+    validation:
+      - argv:
+          - "/home/henry/anaconda3/envs/daily/bin/python"
+          - "-m"
+          - "pytest"
+          - "tests/test_icons.py"
+          - "tests/test_system_tray.py"
+          - "-q"
+
+  - id: task-5
+    plan_task: 5
+    lane: icon-pipeline
+    sequence: 5
+    title: Point the .desktop entry at the colour asset
+    tier: standard
+    depends_on:
+      - task-4
+      - task-1
+    ownership:
+      - "src/ai_manager/services/desktop_integration.py"
+      - "tests/test_desktop_integration.py"
+    resources: []
+    produces:
+      []
+    consumes:
+      - interface: asset_path
+        from_task: task-1
+        signature: "asset_path(kind: str) -> Path | None"
+        signature_digest: 8cae5cd923542881
+    validation:
+      - argv:
+          - "/home/henry/anaconda3/envs/daily/bin/python"
+          - "-m"
+          - "pytest"
+          - "tests/test_desktop_integration.py"
+          - "-q"
+
+  - id: task-6
+    plan_task: 6
+    lane: icon-pipeline
+    sequence: 6
+    title: Declare package data and run the full suite
+    tier: fast
+    depends_on:
+      - task-5
+      - task-1
+      - task-2
+      - task-3
+      - task-4
+    ownership:
+      - "pyproject.toml"
+    resources: []
+    produces:
+      []
+    consumes:
+      []
+    validation:
+      - argv:
+          - "/home/henry/anaconda3/envs/daily/bin/python"
+          - "-m"
+          - "pytest"
+          - "tests/"
+          - "-q"
