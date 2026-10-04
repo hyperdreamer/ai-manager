@@ -51,6 +51,7 @@ tasks:
     title: SupervisorManager Batch Service Controls
     tier: frontier
     depends_on:
+      - task-2
       - task-1
     ownership:
       - src/ai_manager/services/supervisor.py
@@ -65,6 +66,7 @@ tasks:
     title: Implement SystemTrayManager Component and Tests
     tier: frontier
     depends_on:
+      - task-3
       - task-1
     ownership:
       - src/ai_manager/ui/system_tray.py
@@ -79,6 +81,7 @@ tasks:
     title: Implement SettingsDialog Component and Tests
     tier: frontier
     depends_on:
+      - task-4
       - task-1
       - task-2
     ownership:
