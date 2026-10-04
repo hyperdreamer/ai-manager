@@ -4,6 +4,7 @@ from typing import List, Optional
 
 from PyQt6.QtWidgets import QApplication
 
+from ai_manager.ui.icons import configure_app_icon
 from ai_manager.ui.main_window import MainWindow
 from ai_manager.utils.path_locator import find_ai_workspace_root
 
@@ -31,6 +32,7 @@ def main():
     minimized = parse_arguments()
 
     app = QApplication(sys.argv)
+    configure_app_icon(app)
     app.setQuitOnLastWindowClosed(False)
     app.setDesktopFileName("ai-manager")
 

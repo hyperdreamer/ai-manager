@@ -186,3 +186,47 @@ def test_symbolic_render_requires_both_colours(qapp):
         icons._render("symbolic", 22, 1.0, None, QColor("#ffffff"))
     with pytest.raises(ValueError):
         icons._render("symbolic", 22, 1.0, QColor("#000000"), None)
+
+
+def test_configure_app_icon_sets_window_icon(qapp):
+    qapp.setWindowIcon(QIcon())
+    icons.configure_app_icon(qapp)
+    assert not qapp.windowIcon().isNull()
+
+
+def test_main_calls_configure_app_icon(monkeypatch):
+    import ai_manager.main as main_module
+
+    calls = []
+    monkeypatch.setattr(
+        main_module, "configure_app_icon", lambda app: calls.append(app)
+    )
+    monkeypatch.setattr(main_module, "parse_arguments", lambda argv=None: False)
+    monkeypatch.setattr(main_module, "find_ai_workspace_root", lambda: None)
+
+    class FakeApp:
+        def __init__(self, argv):
+            pass
+
+        def setQuitOnLastWindowClosed(self, value):
+            pass
+
+        def setDesktopFileName(self, value):
+            pass
+
+        def exec(self):
+            return 0
+
+    class FakeWindow:
+        def __init__(self, **kwargs):
+            self.is_minimized_at_startup = False
+
+        def show(self):
+            pass
+
+    monkeypatch.setattr(main_module, "QApplication", FakeApp)
+    monkeypatch.setattr(main_module, "MainWindow", FakeWindow)
+
+    with pytest.raises(SystemExit):
+        main_module.main()
+    assert len(calls) == 1
