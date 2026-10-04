@@ -34,6 +34,20 @@ Located in `src/ai_manager/config/models.py`:
 - `autostart: bool = False`: Controls presence of `~/.config/autostart/ai-manager.desktop`.
 - `first_close_notice_shown: bool = False`: Tracks whether the introductory "app is still running in tray" notification has been displayed.
 
+### 2.1.1 Application Lifecycle & Quit Handling
+- **`QApplication.setQuitOnLastWindowClosed(False)`**: Configured in `main.py` so closing/hiding `MainWindow` does not cause Qt to terminate the application event loop while the tray icon is active.
+- **Unsaved Changes vs. Close-to-Tray**:
+  - Closing `MainWindow` to tray (`close_to_tray=True`) simply hides the window; unsaved in-memory draft configurations are retained without prompting to "Discard and exit?".
+  - True Application Exit (via Tray Context Menu -> "Quit ai-manager" or toolbar action): Prompts the user if unsaved draft changes exist. If cancelled, the quit operation is aborted.
+- **CLI Flags as Runtime Overrides**:
+  - `--minimized` / `--tray` are session-only overrides (starting the app with window hidden) and do NOT overwrite the persisted `start_minimized` boolean in `settings.json`.
+- **Desktop File Executable & Environment Resolution**:
+  - `.desktop` files point to the launcher wrapper `/home/bin/ai-manager` (or `start.sh`) to preserve necessary environment flags (`QT_XCB_GL_INTEGRATION=none`) and Conda environment activation.
+- **Wayland / KDE Plasma Desktop Entry Binding**:
+  - Call `app.setDesktopFileName("ai-manager")` in `main.py` so Wayland compositors bind the running window to the `.desktop` file for taskbar grouping and tray association.
+- **Window Activation**:
+  - Restoring `MainWindow` from the system tray calls `window.showNormal()`, `window.raise_()`, and `window.activateWindow()` to guarantee the window is brought to the foreground in KDE Plasma.
+
 ### 2.2 System Integration Service (`DesktopIntegrationService`)
 A new dedicated module `src/ai_manager/services/desktop_integration.py` responsible for managing Linux desktop entries:
 - **Paths**:
