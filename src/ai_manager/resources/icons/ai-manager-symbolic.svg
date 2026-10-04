@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
+<g stroke="__HALO__" stroke-width="3.1" stroke-linecap="round">
+<line x1="12" y1="13.5" x2="12.00" y2="6.40"/>
+<line x1="12" y1="13.5" x2="5.85" y2="17.05"/>
+<line x1="12" y1="13.5" x2="18.15" y2="17.05"/>
+</g>
+<g fill="__HALO__">
+<circle cx="12.00" cy="6.40" r="2.8"/>
+<circle cx="5.85" cy="17.05" r="2.8"/>
+<circle cx="18.15" cy="17.05" r="2.8"/>
+<circle cx="12" cy="13.5" r="4.3"/>
+</g>
+<g stroke="__GLYPH__" stroke-width="1.5" stroke-linecap="round">
+<line x1="12" y1="13.5" x2="12.00" y2="6.40"/>
+<line x1="12" y1="13.5" x2="5.85" y2="17.05"/>
+<line x1="12" y1="13.5" x2="18.15" y2="17.05"/>
+</g>
+<g fill="__GLYPH__">
+<circle cx="12.00" cy="6.40" r="2.0"/>
+<circle cx="5.85" cy="17.05" r="2.0"/>
+<circle cx="18.15" cy="17.05" r="2.0"/>
+<circle cx="12" cy="13.5" r="3.5"/></g></svg>
