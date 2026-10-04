@@ -55,11 +55,11 @@ class DesktopIntegrationService:
         self.workspace_root = workspace_root or find_ai_workspace_root()
 
     def get_launcher_command(self, start_minimized: bool = False) -> str:
-        """Resolves the executable or wrapper script path.
+        """Resolves the executable or wrapper script path with proper quoting.
         Priority:
-        1. /home/bin/ai-manager (if executable)
-        2. workspace_root / "start.sh" (if executable)
-        3. sys.executable -m ai_manager.main
+        1. workspace_root / "start.sh" (if executable)
+        2. shutil.which("ai-manager")
+        3. sys.executable + " -m ai_manager.main"
         Appends ' --minimized' if start_minimized is True.
         """
 
@@ -71,6 +71,7 @@ class DesktopIntegrationService:
         GenericName=AI Service Manager & Provider Configurator
         Comment=Configure AI models and supervise local AI backend services
         Exec=<launcher_command>
+        Path=<workspace_root>
         Icon=utilities-system-monitor
         Terminal=false
         Categories=Development;Utility;Settings;
@@ -83,7 +84,7 @@ class DesktopIntegrationService:
 
     def install_desktop_shortcut(self) -> bool:
         """Writes generate_desktop_entry(start_minimized=False) to APP_DESKTOP_DIR / DESKTOP_FILE_NAME.
-        Ensures directory exists. Calls update-desktop-database if available.
+        Ensures directory exists. Calls update-desktop-database APP_DESKTOP_DIR safely if available.
         Returns True on success.
         """
 
@@ -95,7 +96,7 @@ class DesktopIntegrationService:
     def is_autostart_enabled(self) -> bool:
         """Returns True if ~/.config/autostart/ai-manager.desktop exists."""
 
-    def set_autostart(self, enabled: bool, start_minimized: bool = True) -> bool:
+    def set_autostart(self, enabled: bool, start_minimized: bool = False) -> bool:
         """If enabled is True:
            Writes generate_desktop_entry(start_minimized=start_minimized) to AUTOSTART_DIR / DESKTOP_FILE_NAME.
         If enabled is False:
@@ -208,8 +209,8 @@ class SettingsDialog(QDialog):
 ## 6. Supervisor Service Controls Extension (`src/ai_manager/services/supervisor.py`)
 
 To fulfill the tray actions (`Start All Supervised Services` / `Stop All Supervised Services`):
-- `start_all_services()`: Starts the supervisor daemon if not running, then iterates managed apps and starts each service if stopped.
-- `stop_all_services()`: Stops each running service sequentially, then stops the supervisor daemon.
+- `start_supervisor()`: Starts the supervisor daemon and all backends together via `ai-backends start`.
+- `stop_supervisor()`: Stops all supervised backends and the supervisor daemon via `ai-backends stop`.
 
 ---
 
@@ -234,13 +235,25 @@ def main():
     sys.exit(app.exec())
 ```
 
-### 7.2 `MainWindow` Event Handling
+### 7.2 `MainWindow` Event Handling, Toolbar & Settings Wiring
+- **Toolbar Addition**:
+  - Add `[⚙ Settings]` `QToolButton` to the main window toolbar.
+  - Connects to `self.open_settings_dialog()`.
+- **Settings Dialog Integration**:
+  - Opens `SettingsDialog(self.settings, self.desktop_service, parent=self)`.
+  - Connects `settings_saved` to `self._on_settings_saved(new_settings)`.
+  - In `_on_settings_saved`:
+    - Updates `self.settings = new_settings` and saves to `settings.json`.
+    - Updates `self._poll_timer.setInterval(new_settings.poll_interval_ms)`.
+    - Calls `self._apply_theme(new_settings.theme)` for instant live application.
 - **Window Activation/Toggle**:
   ```python
   def toggle_window_visibility(self):
       if self.isVisible() and not self.isMinimized() and self.isActiveWindow():
           self.hide()
       else:
+          # Unminimize and activate reliably on KDE Plasma / Wayland / X11
+          self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized | Qt.WindowState.WindowActive)
           self.showNormal()
           self.raise_()
           self.activateWindow()
@@ -249,12 +262,6 @@ def main():
   ```python
   def closeEvent(self, event: QCloseEvent):
       if self._force_quit:
-          # Verify unsaved changes if quitting application
-          if self.has_unsaved_changes():
-              reply = QMessageBox.question(self, "Unsaved Changes", "You have unsaved changes. Discard and exit?", ...)
-              if reply != QMessageBox.StandardButton.Yes:
-                  event.ignore()
-                  return
           event.accept()
           return
 
@@ -271,8 +278,14 @@ def main():
       else:
           # Regular window close without tray
           if self.has_unsaved_changes():
-              reply = QMessageBox.question(...)
-              if reply != QMessageBox.StandardButton.Yes:
+              reply = QMessageBox.question(
+                  self,
+                  "Unsaved Changes",
+                  "You have unsaved changes. Discard and exit?",
+                  QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                  QMessageBox.StandardButton.Cancel,
+              )
+              if reply != QMessageBox.StandardButton.Discard:
                   event.ignore()
                   return
           event.accept()
@@ -280,27 +293,43 @@ def main():
 - **Quit Action**:
   ```python
   def handle_quit(self):
+      if self.has_unsaved_changes():
+          self.showNormal()
+          self.raise_()
+          self.activateWindow()
+          reply = QMessageBox.question(
+              self,
+              "Unsaved Changes",
+              "You have unsaved changes. Discard and exit?",
+              QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+              QMessageBox.StandardButton.Cancel,
+          )
+          if reply != QMessageBox.StandardButton.Discard:
+              return
       self._force_quit = True
-      self.close() # triggers closeEvent with _force_quit = True
-      if self._force_quit and not self.isVisible():
-          QApplication.instance().quit()
+      self.close()
+      QApplication.instance().quit()
   ```
 
 ---
 
 ## 8. Test Strategy & Verification Fixtures
 
-1. **`tests/test_desktop_integration.py`**:
-   - `test_generate_desktop_entry`: Verify generated text conforms to INI FreeDesktop specifications, contains valid Exec path and `--minimized` when requested.
-   - `test_install_and_remove_desktop_shortcut`: Use mock/monkeypatched `APP_DESKTOP_DIR` to test atomic file writes, permissions, and clean deletion.
+1. **Test Fixtures & Headless Isolation**:
+   - Provide `mock_tray_available` in `conftest.py` that monkeypatches `QSystemTrayIcon.isSystemTrayAvailable` to return `True` without requiring a physical DBus notification daemon.
+   - Use `qtbot.waitUntil` and `qtbot.wait_exposed` for reliable PyQt6 UI state assertions.
+2. **`tests/test_desktop_integration.py`**:
+   - `test_generate_desktop_entry`: Verify generated text conforms to INI FreeDesktop specifications, contains valid quoted Exec path, `Path=` key, and `--minimized` when requested.
+   - `test_install_and_remove_desktop_shortcut`: Use mock `APP_DESKTOP_DIR` in `tmp_path` to test atomic file writes, permissions, and clean deletion.
    - `test_autostart_toggle`: Test writing and removing autostart desktop entry in isolated temp path.
-2. **`tests/test_user_settings.py`**:
+3. **`tests/test_user_settings.py`**:
    - Test default values for new fields (`close_to_tray`, `start_minimized`, `autostart`, `first_close_notice_shown`).
    - Test roundtrip serialization to and from JSON.
-3. **`tests/test_system_tray.py`**:
+4. **`tests/test_system_tray.py`**:
    - Test signals emitted on menu action triggers and single click activation.
    - Test `update_visibility_action_text` sets appropriate text.
-4. **`tests/test_main_window_tray.py`**:
+5. **`tests/test_main_window_tray.py`**:
    - Test `closeEvent` ignores event and hides window when `close_to_tray=True`.
    - Test `closeEvent` accepts when `_force_quit=True`.
-   - Test `toggle_window_visibility` state changes.
+   - Test `toggle_window_visibility` unminimizes and restores window state.
+   - Test `open_settings_dialog` and live settings synchronization.
