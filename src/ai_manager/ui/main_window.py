@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Dict, Optional
 from PyQt6.QtCore import QThreadPool, QTimer, Qt
-from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtGui import QCloseEvent, QColor, QPalette
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -262,6 +262,34 @@ class MainWindow(QMainWindow):
         qapp = QApplication.instance()
         if qapp:
             qapp.setStyleSheet(get_stylesheet(theme))
+            palette = QPalette()
+            if theme == ThemeMode.DARK:
+                palette.setColor(QPalette.ColorRole.Window, QColor("#18181f"))
+                palette.setColor(QPalette.ColorRole.WindowText, QColor("#e2e8f0"))
+                palette.setColor(QPalette.ColorRole.Base, QColor("#121217"))
+                palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#1b1b22"))
+                palette.setColor(QPalette.ColorRole.ToolTipBase, QColor("#20202a"))
+                palette.setColor(QPalette.ColorRole.ToolTipText, QColor("#f3f4f6"))
+                palette.setColor(QPalette.ColorRole.Text, QColor("#e2e8f0"))
+                palette.setColor(QPalette.ColorRole.Button, QColor("#262633"))
+                palette.setColor(QPalette.ColorRole.ButtonText, QColor("#e2e8f0"))
+                palette.setColor(QPalette.ColorRole.BrightText, QColor("#ffffff"))
+                palette.setColor(QPalette.ColorRole.Highlight, QColor("#2563eb"))
+                palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+            else:
+                palette.setColor(QPalette.ColorRole.Window, QColor("#ffffff"))
+                palette.setColor(QPalette.ColorRole.WindowText, QColor("#1e293b"))
+                palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+                palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#f1f5f9"))
+                palette.setColor(QPalette.ColorRole.ToolTipBase, QColor("#ffffff"))
+                palette.setColor(QPalette.ColorRole.ToolTipText, QColor("#0f172a"))
+                palette.setColor(QPalette.ColorRole.Text, QColor("#0f172a"))
+                palette.setColor(QPalette.ColorRole.Button, QColor("#ffffff"))
+                palette.setColor(QPalette.ColorRole.ButtonText, QColor("#334155"))
+                palette.setColor(QPalette.ColorRole.BrightText, QColor("#ffffff"))
+                palette.setColor(QPalette.ColorRole.Highlight, QColor("#2563eb"))
+                palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+            qapp.setPalette(palette)
         self._theme_btn.setText("🌙 Dark" if theme == ThemeMode.DARK else "☀️ Light")
 
     def has_unsaved_changes(self) -> bool:

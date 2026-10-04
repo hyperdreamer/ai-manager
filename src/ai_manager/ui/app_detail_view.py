@@ -39,6 +39,7 @@ class AppDetailView(QWidget):
 
     def __init__(self, app_meta: AppMetadata, parent: Optional[QWidget] = None):
         super().__init__(parent)
+        self.setObjectName("appDetailView")
         self.app_meta = app_meta
         self._current_config = AppAIConfig()
         self._available_models: List[str] = []
@@ -59,9 +60,9 @@ class AppDetailView(QWidget):
 
         title_box = QVBoxLayout()
         self._title_label = QLabel(f"{self.app_meta.display_name} (Port {self.app_meta.default_port})", self)
-        self._title_label.setStyleSheet("font-size: 16px; font-weight: bold;")
+        self._title_label.setObjectName("appTitleLabel")
         self._desc_label = QLabel(self.app_meta.description, self)
-        self._desc_label.setStyleSheet("font-size: 11px; color: #888;")
+        self._desc_label.setObjectName("appDescLabel")
         title_box.addWidget(self._title_label)
         title_box.addWidget(self._desc_label)
 
@@ -164,7 +165,7 @@ class AppDetailView(QWidget):
 
         # Quick picks tag chips
         chips_header = QLabel("Quick picks from provider:", self)
-        chips_header.setStyleSheet("font-size: 11px; color: #888;")
+        chips_header.setObjectName("formSectionMuted")
         m_layout.addWidget(chips_header)
 
         self._chips_layout = QHBoxLayout()
@@ -189,7 +190,7 @@ class AppDetailView(QWidget):
         self._save_only_btn = QPushButton("Save Config Only", self)
         self._save_only_btn.clicked.connect(lambda: self._emit_save(restart=False))
 
-        self._save_restart_btn = QPushButton("Save & Restart App", self)
+        self._save_restart_btn = QPushButton("Save and Restart Services", self)
         self._save_restart_btn.setObjectName("primaryActionBtn")
         self._save_restart_btn.clicked.connect(lambda: self._emit_save(restart=True))
 
