@@ -1,0 +1,120 @@
+schema_version: 1
+topic: system-tray-settings
+source_plan:
+  path: docs/superpowers/plans/2026-10-04-system-tray-settings.md
+  sha256: 46d0cb7dcc3e68df1d684cd1e226b1c93ba88a64602140a4f850e16caea12bb4
+
+lanes:
+  - id: core-lane
+    name: Core System Tray and Settings Lane
+    task_ids:
+      - task-1
+      - task-2
+      - task-3
+      - task-4
+      - task-5
+      - task-6
+      - task-7
+
+tasks:
+  - id: task-1
+    plan_task: 1
+    lane: core-lane
+    sequence: 1
+    title: Extend UserSettings Model and Tests
+    tier: frontier
+    depends_on: []
+    ownership:
+      - src/ai_manager/config/models.py
+      - tests/test_user_settings.py
+    validation:
+      - pytest tests/test_user_settings.py
+
+  - id: task-2
+    plan_task: 2
+    lane: core-lane
+    sequence: 2
+    title: Implement DesktopIntegrationService and Tests
+    tier: frontier
+    depends_on:
+      - task-1
+    ownership:
+      - src/ai_manager/services/desktop_integration.py
+      - tests/test_desktop_integration.py
+    validation:
+      - pytest tests/test_desktop_integration.py
+
+  - id: task-3
+    plan_task: 3
+    lane: core-lane
+    sequence: 3
+    title: SupervisorManager Batch Service Controls
+    tier: frontier
+    depends_on:
+      - task-1
+    ownership:
+      - src/ai_manager/services/supervisor.py
+      - tests/test_supervisor.py
+    validation:
+      - pytest tests/test_supervisor.py
+
+  - id: task-4
+    plan_task: 4
+    lane: core-lane
+    sequence: 4
+    title: Implement SystemTrayManager Component and Tests
+    tier: frontier
+    depends_on:
+      - task-1
+    ownership:
+      - src/ai_manager/ui/system_tray.py
+      - tests/test_system_tray.py
+    validation:
+      - pytest tests/test_system_tray.py
+
+  - id: task-5
+    plan_task: 5
+    lane: core-lane
+    sequence: 5
+    title: Implement SettingsDialog Component and Tests
+    tier: frontier
+    depends_on:
+      - task-1
+      - task-2
+    ownership:
+      - src/ai_manager/ui/settings_dialog.py
+      - tests/test_settings_dialog.py
+    validation:
+      - pytest tests/test_settings_dialog.py
+
+  - id: task-6
+    plan_task: 6
+    lane: core-lane
+    sequence: 6
+    title: Integrate System Tray and Settings into MainWindow
+    tier: frontier
+    depends_on:
+      - task-1
+      - task-2
+      - task-3
+      - task-4
+      - task-5
+    ownership:
+      - src/ai_manager/ui/main_window.py
+      - tests/test_main_window_tray.py
+    validation:
+      - pytest tests/test_main_window_tray.py
+
+  - id: task-7
+    plan_task: 7
+    lane: core-lane
+    sequence: 7
+    title: CLI Arguments and Startup Integration in main.py
+    tier: frontier
+    depends_on:
+      - task-6
+    ownership:
+      - src/ai_manager/main.py
+      - tests/test_main_cli.py
+    validation:
+      - pytest tests/

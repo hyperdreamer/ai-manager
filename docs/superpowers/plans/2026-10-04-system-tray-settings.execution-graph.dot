@@ -1,0 +1,30 @@
+digraph execution_graph {
+  rankdir=LR;
+  node [shape=box, style="rounded,filled", fillcolor="#1e222a", fontcolor="#f0f3f6", color="#373e4c", fontname="Noto Sans"];
+  edge [color="#3b82f6", fontcolor="#94a3b8", fontname="Noto Sans"];
+
+  subgraph cluster_core_lane {
+    label = "Core System Tray and Settings Lane";
+    style = rounded;
+    color = "#3b82f6";
+    fontcolor = "#3b82f6";
+    fontname = "Noto Sans Bold";
+
+    task1 [label="Task 1: Extend UserSettings\n(Frontier)"];
+    task2 [label="Task 2: DesktopIntegrationService\n(Frontier)"];
+    task3 [label="Task 3: SupervisorManager Batch Controls\n(Frontier)"];
+    task4 [label="Task 4: SystemTrayManager Component\n(Frontier)"];
+    task5 [label="Task 5: SettingsDialog Component\n(Frontier)"];
+    task6 [label="Task 6: MainWindow Integration\n(Frontier)"];
+    task7 [label="Task 7: CLI & Startup in main.py\n(Frontier)"];
+
+    task1 -> task2;
+    task1 -> task3;
+    task1 -> task4;
+    task2 -> task5;
+    task3 -> task6;
+    task4 -> task6;
+    task5 -> task6;
+    task6 -> task7;
+  }
+}
