@@ -1,0 +1,51 @@
+digraph execution_graph {
+    rankdir=LR;
+    node [shape=box, style="rounded,filled", fontname="sans-serif"];
+
+    subgraph cluster_core {
+        label = "Core Foundations & YAML Manager";
+        style = "dashed";
+        color = "#3b82f6";
+        node [fillcolor="#eff6ff"];
+        "task-1" [label="Task 1: Project Scaffolding & Core Models\n[standard]"];
+        "task-2" [label="Task 2: Provider Presets & App Registry\n[standard]"];
+        "task-3" [label="Task 3: Round-Trip YAML Manager (ruamel.yaml)\n[frontier]"];
+        "task-1" -> "task-2" -> "task-3";
+    }
+
+    subgraph cluster_services {
+        label = "Background Services";
+        style = "dashed";
+        color = "#10b981";
+        node [fillcolor="#ecfdf5"];
+        "task-4" [label="Task 4: Background Model Fetcher (/v1/models)\n[frontier]"];
+        "task-5" [label="Task 5: Async Supervisor Integration (ai-backends)\n[frontier]"];
+        "task-1" -> "task-4";
+        "task-1" -> "task-5";
+    }
+
+    subgraph cluster_ui {
+        label = "PyQt6 User Interface";
+        style = "dashed";
+        color = "#8b5cf6";
+        node [fillcolor="#f5f3ff"];
+        "task-6" [label="Task 6: Theme Stylesheets & Custom Widgets\n[standard]"];
+        "task-7" [label="Task 7: App Sidebar & Detail View\n[frontier]"];
+        "task-8" [label="Task 8: Main Window & State Management\n[frontier]"];
+        "task-1" -> "task-6";
+        "task-3" -> "task-7";
+        "task-4" -> "task-7";
+        "task-6" -> "task-7";
+        "task-5" -> "task-8";
+        "task-7" -> "task-8";
+    }
+
+    subgraph cluster_release {
+        label = "Packaging & Release";
+        style = "dashed";
+        color = "#f59e0b";
+        node [fillcolor="#fffbeb"];
+        "task-9" [label="Task 9: Packaging, start.sh & E2E Tests\n[standard]"];
+        "task-8" -> "task-9";
+    }
+}

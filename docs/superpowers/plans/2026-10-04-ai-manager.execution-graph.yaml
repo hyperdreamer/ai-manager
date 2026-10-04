@@ -1,0 +1,170 @@
+version: "1"
+source_plan:
+  path: docs/superpowers/plans/2026-10-04-ai-manager.md
+  sha256: 23fc984c260a2d7850987ef4948fd213a6d885160af9c021e2795d469addf9e4
+
+lanes:
+  - id: core
+    description: Core foundation models, registry, and ruamel YAML manager
+    task_ids:
+      - task-1
+      - task-2
+      - task-3
+
+  - id: services
+    description: Background model fetcher and async supervisor runner
+    task_ids:
+      - task-4
+      - task-5
+
+  - id: ui
+    description: PyQt6 themes, custom widgets, views, and main window
+    task_ids:
+      - task-6
+      - task-7
+      - task-8
+
+  - id: release
+    description: Packaging, start script, and end-to-end integration tests
+    task_ids:
+      - task-9
+
+tasks:
+  - id: task-1
+    plan_task: 1
+    title: Project Scaffolding and Core Data Models
+    lane: core
+    sequence: 1
+    tier: standard
+    depends_on: []
+    ownership_patterns:
+      - "pyproject.toml"
+      - "src/ai_manager/__init__.py"
+      - "src/ai_manager/config/models.py"
+      - "src/ai_manager/utils/env_resolver.py"
+      - "src/ai_manager/utils/path_locator.py"
+      - "tests/test_models.py"
+      - "tests/test_env_resolver.py"
+    validation_commands:
+      - ["pytest", "tests/test_models.py", "tests/test_env_resolver.py"]
+
+  - id: task-2
+    plan_task: 2
+    title: Provider Presets and Application Registry
+    lane: core
+    sequence: 2
+    tier: standard
+    depends_on:
+      - task-1
+    ownership_patterns:
+      - "src/ai_manager/config/presets.py"
+      - "src/ai_manager/config/app_registry.py"
+      - "tests/test_app_registry.py"
+    validation_commands:
+      - ["pytest", "tests/test_app_registry.py"]
+
+  - id: task-3
+    plan_task: 3
+    title: Round-Trip YAML Configuration Manager
+    lane: core
+    sequence: 3
+    tier: frontier
+    depends_on:
+      - task-2
+    ownership_patterns:
+      - "src/ai_manager/config/yaml_manager.py"
+      - "tests/fixtures/**"
+      - "tests/test_yaml_manager.py"
+    validation_commands:
+      - ["pytest", "tests/test_yaml_manager.py"]
+
+  - id: task-4
+    plan_task: 4
+    title: Background Model Discovery Worker
+    lane: services
+    sequence: 1
+    tier: frontier
+    depends_on:
+      - task-1
+    ownership_patterns:
+      - "src/ai_manager/services/model_fetcher.py"
+      - "tests/test_model_fetcher.py"
+    validation_commands:
+      - ["pytest", "tests/test_model_fetcher.py"]
+
+  - id: task-5
+    plan_task: 5
+    title: Asynchronous ai-backends Supervisor Integration
+    lane: services
+    sequence: 2
+    tier: frontier
+    depends_on:
+      - task-1
+    ownership_patterns:
+      - "src/ai_manager/services/supervisor.py"
+      - "tests/test_supervisor.py"
+    validation_commands:
+      - ["pytest", "tests/test_supervisor.py"]
+
+  - id: task-6
+    plan_task: 6
+    title: Theme Stylesheets and Custom UI Widgets
+    lane: ui
+    sequence: 1
+    tier: standard
+    depends_on:
+      - task-1
+    ownership_patterns:
+      - "src/ai_manager/ui/theme.py"
+      - "src/ai_manager/ui/widgets/**"
+      - "tests/test_widgets.py"
+    validation_commands:
+      - ["pytest", "tests/test_widgets.py"]
+
+  - id: task-7
+    plan_task: 7
+    title: App Sidebar and Detail View
+    lane: ui
+    sequence: 2
+    tier: frontier
+    depends_on:
+      - task-3
+      - task-4
+      - task-6
+    ownership_patterns:
+      - "src/ai_manager/ui/app_sidebar.py"
+      - "src/ai_manager/ui/app_detail_view.py"
+      - "tests/test_app_views.py"
+    validation_commands:
+      - ["pytest", "tests/test_app_views.py"]
+
+  - id: task-8
+    plan_task: 8
+    title: Main Window Integration, State Management, and Supervisor Polling
+    lane: ui
+    sequence: 3
+    tier: frontier
+    depends_on:
+      - task-5
+      - task-7
+    ownership_patterns:
+      - "src/ai_manager/ui/main_window.py"
+      - "src/ai_manager/main.py"
+      - "tests/test_main_window.py"
+    validation_commands:
+      - ["pytest", "tests/test_main_window.py"]
+
+  - id: task-9
+    plan_task: 9
+    title: Packaging, Start Script, and End-to-End Test Suite Verification
+    lane: release
+    sequence: 1
+    tier: standard
+    depends_on:
+      - task-8
+    ownership_patterns:
+      - "start.sh"
+      - "README.md"
+      - "tests/test_e2e_integration.py"
+    validation_commands:
+      - ["pytest", "tests/"]
