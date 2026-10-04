@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-manager"
-version = "0.1.0"
+version = "0.1.1"
 description = "Desktop administration GUI for local AI backends"
 authors = [{ name = "Henry", email = "henry@local" }]
 dependencies = [
