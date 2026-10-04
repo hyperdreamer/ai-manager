@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Dict, Optional
 from PyQt6.QtCore import QThreadPool, QTimer, Qt
-from PyQt6.QtGui import QCloseEvent, QColor, QPalette
+from PyQt6.QtGui import QCloseEvent, QColor, QHideEvent, QPalette, QShowEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QHBoxLayout,
@@ -104,6 +104,7 @@ class MainWindow(QMainWindow):
         self.tray_manager.quit_requested.connect(self.handle_quit)
         if self.tray_manager.is_available():
             self.tray_manager.show()
+        self.tray_manager.update_visibility_action_text(self.isVisible())
 
         # Runtime-only override; never persisted to settings.json.
         self.is_minimized_at_startup = bool(
@@ -355,6 +356,13 @@ class MainWindow(QMainWindow):
         # _apply_theme also persists, which is harmless and idempotent.
         self._apply_theme(new_settings.theme)
 
+    def _exit_application(self) -> None:
+        """Terminate the process even though quit-on-last-window is disabled."""
+        self._force_quit = True
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+
     def handle_quit(self) -> None:
         """Quit the application, guarding against unsaved drafts."""
         if self.has_unsaved_changes():
@@ -370,9 +378,11 @@ class MainWindow(QMainWindow):
             )
             if reply != QMessageBox.StandardButton.Discard:
                 return
+        # Set force_quit before closing so closeEvent accepts even when
+        # close-to-tray would otherwise intercept an explicit quit.
         self._force_quit = True
         self.close()
-        QApplication.instance().quit()
+        self._exit_application()
 
     def has_unsaved_changes(self) -> bool:
         for app_id, saved in self._saved_configs.items():
@@ -407,9 +417,18 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
-            if reply == QMessageBox.StandardButton.Discard:
-                event.accept()
-            else:
+            if reply != QMessageBox.StandardButton.Discard:
                 event.ignore()
-        else:
-            event.accept()
+                return
+        event.accept()
+        # quitOnLastWindowClosed is disabled, so accepting the close is not
+        # enough on its own: explicitly terminate the application.
+        self._exit_application()
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        self.tray_manager.update_visibility_action_text(True)
+
+    def hideEvent(self, event: QHideEvent) -> None:
+        super().hideEvent(event)
+        self.tray_manager.update_visibility_action_text(False)

@@ -21,6 +21,11 @@ from PyQt6.QtWidgets import (
 class SystemTrayManager(QObject):
     """Owns the tray icon, its context menu and activation behaviour."""
 
+    # Reserved for future distinct show/hide requests. The context menu and
+    # single-click activation currently funnel through
+    # ``toggle_window_requested`` because the tray exposes one dynamic
+    # Show/Hide item; these signals are kept to preserve the documented
+    # interface for consumers that need to distinguish the two intents later.
     show_window_requested = pyqtSignal()
     hide_window_requested = pyqtSignal()
     toggle_window_requested = pyqtSignal()

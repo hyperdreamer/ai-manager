@@ -67,23 +67,18 @@ def test_update_visibility_action_text(manager):
     assert manager._toggle_action.text() == "Show ai-manager"
 
 
-def test_is_available_is_not_cached(monkeypatch, manager):
-    monkeypatch.setattr(
-        QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
-    )
+def test_is_available_is_not_cached(mock_tray_available, manager):
+    mock_tray_available(False)
     assert manager.is_available() is False
 
-    monkeypatch.setattr(
-        QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
-    )
+    mock_tray_available(True)
     assert manager.is_available() is True
 
 
-def test_show_message_delegates_when_available(monkeypatch, manager):
+def test_show_message_delegates_when_available(
+    monkeypatch, mock_tray_available, manager
+):
     calls = []
-    monkeypatch.setattr(
-        QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: True)
-    )
     monkeypatch.setattr(
         manager._tray_icon, "showMessage", lambda *args: calls.append(args)
     )
@@ -95,11 +90,11 @@ def test_show_message_delegates_when_available(monkeypatch, manager):
     ]
 
 
-def test_show_message_is_skipped_when_tray_unavailable(monkeypatch, manager):
+def test_show_message_is_skipped_when_tray_unavailable(
+    monkeypatch, mock_tray_available, manager
+):
     calls = []
-    monkeypatch.setattr(
-        QSystemTrayIcon, "isSystemTrayAvailable", staticmethod(lambda: False)
-    )
+    mock_tray_available(False)
     monkeypatch.setattr(
         manager._tray_icon, "showMessage", lambda *args: calls.append(args)
     )

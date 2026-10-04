@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -86,10 +87,20 @@ class SettingsDialog(QDialog):
         hint.setObjectName("formSectionMuted")
         hint.setIndent(26)
 
+        self.lbl_tray_unavailable = QLabel(
+            "System tray is unavailable on this display server; closing the "
+            "window will exit the application instead of minimizing to tray.",
+            group,
+        )
+        self.lbl_tray_unavailable.setObjectName("formSectionMuted")
+        self.lbl_tray_unavailable.setWordWrap(True)
+        self.lbl_tray_unavailable.setVisible(not QSystemTrayIcon.isSystemTrayAvailable())
+
         group_layout.addWidget(self.chk_close_to_tray)
         group_layout.addWidget(self.chk_start_minimized)
         group_layout.addWidget(self.chk_autostart)
         group_layout.addWidget(hint)
+        group_layout.addWidget(self.lbl_tray_unavailable)
         return group
 
     def _build_desktop_group(self) -> QGroupBox:
@@ -128,6 +139,8 @@ class SettingsDialog(QDialog):
         self.cmb_poll_interval = QComboBox(group)
         for interval in POLL_INTERVAL_OPTIONS:
             self.cmb_poll_interval.addItem(f"{interval} ms", interval)
+        # Spec §5.2 refers to this widget as ``cmb_poll``; expose both names.
+        self.cmb_poll = self.cmb_poll_interval
 
         form.addRow("Theme:", self.cmb_theme)
         form.addRow("Polling Interval:", self.cmb_poll_interval)

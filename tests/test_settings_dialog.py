@@ -71,6 +71,31 @@ def test_initial_control_states_reflect_settings(dialog):
     assert dialog.lbl_desktop_status.text() == "Installed in Application Menu"
 
 
+def test_cmb_poll_attribute_alias(dialog):
+    # Spec §5.2 names the widget cmb_poll while the implementation uses the
+    # more explicit cmb_poll_interval; both names must resolve.
+    assert dialog.cmb_poll is dialog.cmb_poll_interval
+
+
+def test_tray_unavailable_notice_shown_when_tray_missing(
+    qtbot, settings, service, mock_tray_available
+):
+    mock_tray_available(False)
+    dlg = SettingsDialog(settings, service)
+    qtbot.addWidget(dlg)
+
+    assert dlg.lbl_tray_unavailable.isHidden() is False
+
+
+def test_tray_unavailable_notice_hidden_when_tray_available(
+    qtbot, settings, service, mock_tray_available
+):
+    dlg = SettingsDialog(settings, service)
+    qtbot.addWidget(dlg)
+
+    assert dlg.lbl_tray_unavailable.isHidden() is True
+
+
 def test_dialog_copies_settings_without_mutating_caller(qtbot, settings, service):
     dlg = SettingsDialog(settings, service)
     qtbot.addWidget(dlg)
