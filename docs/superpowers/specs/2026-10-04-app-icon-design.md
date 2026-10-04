@@ -52,10 +52,13 @@ within a 2px margin, so nothing clips at any render size.
 
 Verified raster output at 16/22/32/48/64/128px on both a light (`#f0f0f0`) and a
 dark (`#18181f`) background; the hub dominates and the satellites read as
-endpoints. Rejected variants (recorded for future reference): gap-separated
-spokes (looks broken at 22px), point-down triangle (reads as a falling "Y"),
-four satellites with or without links (loses the "three managed services"
-meaning).
+endpoints. Reproduce with
+`docs/superpowers/specs/mockups/generate_icon_preview.py`, which writes
+`docs/superpowers/specs/mockups/app_icon_preview.png` (side-by-side with the
+current `SP_ComputerIcon` fallback). Rejected variants (recorded for future
+reference): gap-separated spokes (looks broken at 22px), point-down triangle
+(reads as a falling "Y"), four satellites with or without links (loses the
+"three managed services" meaning).
 
 ### 2.2 Exact assets
 
