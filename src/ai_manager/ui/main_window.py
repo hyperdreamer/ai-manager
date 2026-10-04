@@ -393,6 +393,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         if self._force_quit:
+            # Invariant: every setter of _force_quit (handle_quit,
+            # _exit_application) also terminates the application, so accepting
+            # here never orphans the process under quitOnLastWindowClosed(False).
             event.accept()
             return
 

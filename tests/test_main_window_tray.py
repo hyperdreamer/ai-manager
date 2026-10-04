@@ -142,6 +142,25 @@ def test_non_tray_close_exits_application(window, monkeypatch):
     assert quit_calls == [True]
 
 
+def test_non_tray_close_without_unsaved_changes_quits(window, monkeypatch):
+    """The no-unsaved-variant of the non-tray exit path must also quit."""
+    window.settings.close_to_tray = False
+    assert window.has_unsaved_changes() is False
+
+    quit_calls = []
+    fake_instance = type(
+        "FakeAppInstance", (), {"quit": lambda self: quit_calls.append(True)}
+    )
+    fake_app = type(
+        "FakeApp", (), {"instance": staticmethod(lambda: fake_instance())}
+    )
+    monkeypatch.setattr(main_window_module, "QApplication", fake_app)
+
+    assert window.close() is True
+    assert window._force_quit is True
+    assert quit_calls == [True]
+
+
 def test_initial_toggle_action_text_reflects_hidden_window(window):
     assert window.tray_manager._toggle_action.text() == "Show ai-manager"
 
