@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from ai_manager.resources import assets
 from ai_manager.services import desktop_integration
 from ai_manager.services.desktop_integration import DesktopIntegrationService
 
@@ -83,7 +84,13 @@ def test_generate_desktop_entry_contains_required_keys(tmp_path):
     assert "Comment=Configure AI models and supervise local AI backend services" in content
     assert f"Exec={service.get_launcher_command()}" in content
     assert f"Path={tmp_path}" in content
-    assert "Icon=utilities-system-monitor" in content
+    icon_line = next(
+        line for line in content.splitlines() if line.startswith("Icon=")
+    )
+    icon_path = assets.asset_path("color")
+    assert icon_path is not None
+    assert icon_line == f"Icon={icon_path}"
+    assert icon_path.is_file()
     assert "Terminal=false" in content
     assert "Categories=Development;Utility;Settings;" in content
     assert "StartupNotify=true" in content
@@ -94,6 +101,15 @@ def test_generate_desktop_entry_minimized_flag(tmp_path):
     service = DesktopIntegrationService(workspace_root=tmp_path)
     content = service.generate_desktop_entry(start_minimized=True)
     assert " --minimized" in content
+
+
+def test_generate_desktop_entry_falls_back_when_asset_missing(tmp_path, monkeypatch):
+    service = DesktopIntegrationService(workspace_root=tmp_path)
+    monkeypatch.setattr(desktop_integration.assets, "asset_path", lambda kind: None)
+
+    content = service.generate_desktop_entry()
+
+    assert "Icon=applications-development" in content
 
 
 def test_install_remove_and_detect_desktop_shortcut(tmp_path, isolated_dirs):
