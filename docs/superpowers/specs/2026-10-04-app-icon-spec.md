@@ -792,7 +792,11 @@ def test_standard_icon_fallback_when_tray_icon_null(qapp, monkeypatch):
 
     expected = qapp.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
     assert not expected.isNull()
-    assert not manager._tray_icon.icon().isNull()
+    installed = manager._tray_icon.icon()
+    assert not installed.isNull()
+    # Pin the identity of the fallback, not merely that some icon is present:
+    # any other standard icon would satisfy a bare non-null check.
+    assert installed.pixmap(22, 22).toImage() == expected.pixmap(22, 22).toImage()
 
 
 def test_configure_app_icon_sets_window_icon(qapp):
@@ -919,7 +923,7 @@ After:
 
 ```python
 import pytest
-from PyQt6.QtGui import QIcon, QPalette
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QSystemTrayIcon
 
 from ai_manager.ui import system_tray
@@ -1006,7 +1010,7 @@ Legend: **T** = `tests/test_icons.py`, **S** = `tests/test_system_tray.py`,
 | T11 | `test_no_application_returns_null_without_abort` (design 9) | A subprocess with no `QApplication` calls `color_icon()` and `tray_icon(None)` and exits 0 with both null. | Verified by mutation: moving the `QGuiApplication.instance()` check after `QPixmap.fromImage` makes the subprocess abort (exit 134) → `returncode == 0` fails. |
 | T12 | `test_device_pixel_ratio_rendering` (design 10) | `availableSizes()` contains 44; `pixmap(QSize(22,22), 2.0)` has `devicePixelRatio() == 2.0` and `width() == 44`; ratio-1.0 query width 22. | Verified by mutation: passing `size` instead of `size * dpr` to `_render` removes the 44 physical entry from `availableSizes()` → `assert 44 in available` fails. |
 | T13 | `test_on_palette_changed_slot_arity` (design 11) | `_on_palette_changed()` and `_on_palette_changed(QPalette())` each trigger one `tray_icon` call. | Change the slot to require a positional argument → `TypeError`; stop calling `_apply_icon` → count 0/1 mismatch. |
-| T14 | `test_standard_icon_fallback_when_tray_icon_null` (design 12) | With `system_tray.tray_icon` monkeypatched to a null icon, `_apply_icon()` installs the non-null `SP_ComputerIcon`. | With the old `app.windowIcon()` code the attribute `system_tray.tray_icon` does not exist → the monkeypatch raises `AttributeError`; if the fallback were removed, `_tray_icon.icon()` is null → fails. |
+| T14 | `test_standard_icon_fallback_when_tray_icon_null` (design 12) | With `system_tray.tray_icon` monkeypatched to a null icon, `_apply_icon()` installs the non-null `SP_ComputerIcon`, compared by rendered pixmap so a different standard icon cannot satisfy it. | With the old `app.windowIcon()` code the attribute `system_tray.tray_icon` does not exist → the monkeypatch raises `AttributeError`; if the fallback were removed, `_tray_icon.icon()` is null → fails. |
 | T15 | `test_configure_app_icon_sets_window_icon` (design 13) | `configure_app_icon(qapp)` leaves `qapp.windowIcon()` non-null. | Make `configure_app_icon` a no-op → window icon stays null → fails. |
 | T16 | `test_main_calls_configure_app_icon` (design 13) | `main()` invokes `configure_app_icon(app)` exactly once. | Verified by mutation: deleting `configure_app_icon(app)` from `main.py` → `calls == []` → `len(calls) == 1` fails. |
 | T17 | `test_symbolic_render_requires_both_colours` (design 14) | `_render("symbolic", ...)` raises `ValueError` when either colour is `None`. | Remove the guard → `pytest.raises(ValueError)` fails. |
@@ -1023,17 +1027,36 @@ Legend: **T** = `tests/test_icons.py`, **S** = `tests/test_system_tray.py`,
 |---|---|
 | Project interpreter (GUI + tests) | `/home/henry/anaconda3/envs/daily/bin/python` (Python 3.14.6, PyQt6 6.11.0 / Qt 6.11.0) |
 | Headless platform | `QT_QPA_PLATFORM=offscreen` — already set by `tests/conftest.py`; do not set or override it in tests. |
-| Full suite | `PYTHONPATH=src pytest tests/` |
-| New tests only | `PYTHONPATH=src pytest tests/test_icons.py` |
-| Changed tests only | `PYTHONPATH=src pytest tests/test_desktop_integration.py tests/test_system_tray.py` |
-| Focused run example | `PYTHONPATH=src pytest tests/test_icons.py::test_symbolic_tint_is_falsifiable -q` |
+| Full suite | `AI_WORKSPACE_ROOT=/data/home/guest/Development/ai PYTHONPATH=src /home/henry/anaconda3/envs/daily/bin/python -m pytest tests/ -q` |
+| New tests only | `PYTHONPATH=src /home/henry/anaconda3/envs/daily/bin/python -m pytest tests/test_icons.py -q` |
+| Changed tests only | `PYTHONPATH=src /home/henry/anaconda3/envs/daily/bin/python -m pytest tests/test_desktop_integration.py tests/test_system_tray.py -q` |
+| Focused run example | `PYTHONPATH=src /home/henry/anaconda3/envs/daily/bin/python -m pytest tests/test_icons.py::test_symbolic_tint_is_falsifiable -q` |
 | Manual render check | `/home/henry/anaconda3/envs/daily/bin/python docs/superpowers/specs/mockups/generate_icon_preview.py` (writes `app_icon_preview.png`) |
 
-If `pytest` is not on `PATH`, invoke it as
-`/home/henry/anaconda3/envs/daily/bin/python -m pytest ...` with the same
-`PYTHONPATH=src`. The subprocess test in `test_icons.py` re-derives the source
-path from `Path(__file__).resolve().parents[1] / "src"`, so it does not depend on
-the caller's `PYTHONPATH`.
+**Always invoke the interpreter explicitly — never a bare `pytest`.** In this
+environment `/usr/bin/pytest` is pytest 9.1.1 running `/usr/bin/python`, which has
+no `ruamel.yaml`. It *is* on `PATH`, so merely testing whether `pytest` exists
+does not catch this. A bare `PYTHONPATH=src pytest tests/` therefore aborts with
+`Interrupted: 6 errors during collection` (`ModuleNotFoundError: No module named
+'ruamel'`) rather than reporting a passing suite. The `daily` interpreter is the
+only supported one.
+
+**Why the full suite needs `AI_WORKSPACE_ROOT`.**
+`tests/test_e2e_integration.py::test_full_workspace_integration` calls
+`find_ai_workspace_root()`, which looks for sibling `ai-grammar`/`textkit`
+directories. An isolated worktree has none, so the test fails there while passing
+in the primary checkout. `find_ai_workspace_root()` honours the
+`AI_WORKSPACE_ROOT` override, so pointing it at the real workspace
+(`/data/home/guest/Development/ai`) makes the test pass from any location. This
+is read-only: all three backends already ship `config.yaml`, so
+`ensure_config_exists` copies nothing. Without the variable the suite reports
+`1 failed, 115 passed`; with it, the suite is green. (The underlying weakness — a
+test whose result depends on the checkout's absolute location — is pre-existing
+and explicitly out of scope.)
+
+The subprocess test in `test_icons.py` re-derives the source path from
+`Path(__file__).resolve().parents[1] / "src"`, so it does not depend on the
+caller's `PYTHONPATH`.
 
 ---
 
@@ -1045,10 +1068,12 @@ Run before claiming completion. Each item must be observed, not assumed.
 2. Both SVGs exist; `wc -c` reports exactly 492 and 870 bytes; neither has a
    trailing newline; the symbolic file still contains both `__GLYPH__` and
    `__HALO__` and no `#rrggbb` value.
-3. `PYTHONPATH=src pytest tests/test_icons.py` passes.
-4. `PYTHONPATH=src pytest tests/test_desktop_integration.py tests/test_system_tray.py`
+3. `PYTHONPATH=src /home/henry/anaconda3/envs/daily/bin/python -m pytest tests/test_icons.py -q`
+   passes.
+4. `PYTHONPATH=src /home/henry/anaconda3/envs/daily/bin/python -m pytest tests/test_desktop_integration.py tests/test_system_tray.py -q`
    passes (the stale `utilities-system-monitor` assertion is gone).
-5. `PYTHONPATH=src pytest tests/` passes in full with no new failures.
+5. `AI_WORKSPACE_ROOT=/data/home/guest/Development/ai PYTHONPATH=src /home/henry/anaconda3/envs/daily/bin/python -m pytest tests/ -q`
+   passes in full with no new failures.
 6. `grep -n "Icon=" src/ai_manager/services/desktop_integration.py` shows the
    computed `f"Icon={icon_value}"` form, not a literal theme name.
 7. `grep -n "from ai_manager.resources.assets import" src/ai_manager/ui/icons.py`
@@ -1119,3 +1144,21 @@ Every item below is resolved in favour of the design document.
    `test_palette_changed_reapplies_icon`.
 8. **Empty `__init__.py` (design §3.3).** No docstring or imports are added so
    the "empty" statement remains literally true.
+
+---
+
+## 14. Review Disposition
+
+Findings from the independent specification review and where they are resolved.
+The review reported 0 blockers, 1 major and 4 minors, and independently built
+this specification into a scratch copy, obtaining **116 passed** with
+`AI_WORKSPACE_ROOT` set, plus 17 mutation probes that each failed as intended.
+
+| Finding | Resolution |
+|---|---|
+| J1 §11/§12 commands do not run as written: bare `pytest` resolves to `/usr/bin/pytest` (pytest 9.1.1 on `/usr/bin/python`, no `ruamel.yaml`), which aborts collection | §11 table and §12 items 3–5 now name the `daily` interpreter explicitly via `python -m pytest`; §11 adds an explicit "never a bare `pytest`" warning and explains why an existence check does not catch it |
+| J1 (part 2) full suite needs the workspace override | §11 documents `AI_WORKSPACE_ROOT=/data/home/guest/Development/ai`, why the e2e test needs it, and that it is read-only |
+| m1 T14 did not pin the `SP_ComputerIcon` identity | T14 now compares `installed.pixmap(22, 22).toImage()` with `expected.pixmap(22, 22).toImage()`; the test matrix row is updated |
+| m2 `tests/test_system_tray.py` after-block imported `QPalette` without using it | Import narrowed to `from PyQt6.QtGui import QIcon` |
+| m3 S1 also passes against the pre-change implementation | No change. Disclosed in §13 item 7 and in the test matrix; S2 is the discriminating test. The design mandates the assertion, so it is retained. |
+| m4 T12 adds `44 in availableSizes()` beyond design §7 item 10 | No change. Justified by design §3.2 ("rendered at `size * dpr` physical pixels") and disclosed in §13 item 2; it is the assertion that makes T12 falsifiable, because the literal `width() == 44` check also passes when rendering at logical size. |
