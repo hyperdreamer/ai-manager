@@ -92,3 +92,7 @@ class UserSettings(BaseModel):
     theme: ThemeMode = ThemeMode.DARK
     poll_interval_ms: int = 4000
     custom_presets: List[ProviderPreset] = Field(default_factory=list)
+    close_to_tray: bool = True
+    start_minimized: bool = False
+    autostart: bool = False
+    first_close_notice_shown: bool = False
