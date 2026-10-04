@@ -24,6 +24,7 @@ from ai_manager.config.models import (
     ServiceStatus,
 )
 from ai_manager.config.presets import DEFAULT_PRESETS
+from ai_manager.ui.mnemonic import escape_mnemonic
 from ai_manager.ui.widgets.api_key_input import ApiKeyInputWidget
 from ai_manager.ui.widgets.model_combo import ModelComboBox
 from ai_manager.ui.widgets.status_badge import StatusBadge
@@ -274,7 +275,9 @@ class AppDetailView(QWidget):
         for m_name in models:
             chip = QToolButton(self)
             chip.setObjectName("modelChip")
-            chip.setText(m_name)
+            # Model names come from arbitrary provider responses; QToolButton
+            # would swallow a single '&' as a mnemonic marker.
+            chip.setText(escape_mnemonic(m_name))
             chip.clicked.connect(lambda _, name=m_name: self._apply_model_choice(name))
             self._chips_layout.addWidget(chip)
 

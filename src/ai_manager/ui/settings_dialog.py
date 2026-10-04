@@ -104,7 +104,9 @@ class SettingsDialog(QDialog):
         return group
 
     def _build_desktop_group(self) -> QGroupBox:
-        group = QGroupBox("Desktop & Application Menu", self)
+        # "&&" renders a literal ampersand; a single "&" would be swallowed
+        # as a mnemonic marker and the title would read "Desktop _Application Menu".
+        group = QGroupBox("Desktop && Application Menu", self)
         group_layout = QVBoxLayout(group)
         group_layout.setSpacing(10)
 
@@ -154,7 +156,9 @@ class SettingsDialog(QDialog):
             self,
         )
         self.btn_save = button_box.button(QDialogButtonBox.StandardButton.Save)
-        self.btn_save.setText("Save & Apply")
+        # "&&" renders a literal ampersand; a single "&" is swallowed as a
+        # mnemonic marker and the button would read "Save _Apply".
+        self.btn_save.setText("Save && Apply")
         self.btn_cancel = button_box.button(QDialogButtonBox.StandardButton.Cancel)
         self.btn_cancel.setText("Cancel")
 
