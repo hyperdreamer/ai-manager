@@ -1,0 +1,19 @@
+server:
+  host: 127.0.0.1
+  port: 8766
+
+# Enable detailed debug logging to stderr
+debug: false
+
+ai:
+  api_base: http://192.168.191.3:3000
+  api_key: sk-dGDHO3zwV2fHL0ZHdrNOWV81MqT6RobGnKHgtY7ZjLbBAdKq
+  model: gemini-flash-high
+  #model: gpt-5.6-terra
+  #model: grok-4.7
+
+  timeout:
+    connect: 10
+    read: 300
+    write: 60
+    pool: 10

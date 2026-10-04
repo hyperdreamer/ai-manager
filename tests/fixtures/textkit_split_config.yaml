@@ -1,0 +1,10 @@
+host: 127.0.0.1
+port: 8765
+
+ai:
+  api_base: http://localhost:3000
+  api_key: sk-test-key
+  ocr:
+    model: qwen3.5-flash
+  text:
+    model: deepseek-v4-flash
