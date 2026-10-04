@@ -1,5 +1,7 @@
+from unittest.mock import MagicMock
+
 from ai_manager.config.models import ServiceRunState
-from ai_manager.services.supervisor import parse_supervisor_status
+from ai_manager.services.supervisor import SupervisorManager, parse_supervisor_status
 
 SAMPLE_RUNNING_OUTPUT = """[2026-10-04 11:47:44] supervisor running: 34491
 ai-grammar   running  pid=2333046 log=/home/henry/.cache/ai-backends/logs/ai-grammar.log
@@ -36,3 +38,32 @@ def test_parse_supervisor_stopped():
     assert status.supervisor_pid is None
     assert len(status.services) == 2
     assert status.services["ai-grammar"].state == ServiceRunState.STOPPED
+
+
+def test_stop_supervisor_runs_stop_command(qtbot, monkeypatch, tmp_path):
+    recorded = {}
+
+    def fake_popen(args, **kwargs):
+        recorded["args"] = list(args)
+        recorded["kwargs"] = kwargs
+        return MagicMock()
+
+    monkeypatch.setattr(
+        "ai_manager.services.supervisor.subprocess.Popen", fake_popen
+    )
+    manager = SupervisorManager(workspace_root=tmp_path)
+    # Isolate from the real QProcess status probe so only the stop command runs.
+    monkeypatch.setattr(
+        manager, "refresh_status", lambda: recorded.__setitem__("refreshed", True)
+    )
+
+    with qtbot.waitSignal(manager.action_completed, timeout=1000) as blocker:
+        manager.stop_supervisor()
+
+    action, success, _msg = blocker.args
+    assert action == "stop_supervisor"
+    assert success is True
+    assert recorded["args"] == [manager.executable, "stop"]
+    assert recorded["args"][1:] == ["stop"]
+    assert recorded["kwargs"].get("start_new_session") is True
+    assert recorded.get("refreshed") is True

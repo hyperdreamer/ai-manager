@@ -135,6 +135,16 @@ class SupervisorManager(QObject):
         except Exception as e:
             self.action_completed.emit("start_supervisor", False, f"Failed to start supervisor: {e}")
 
+    def stop_supervisor(self) -> None:
+        """Runs `ai-backends stop` in the background."""
+        # ai-backends stop runs in the foreground by default, so we can launch it detached
+        try:
+            subprocess.Popen([self.executable, "stop"], start_new_session=True)
+            self.action_completed.emit("stop_supervisor", True, "Supervisor stopped.")
+            self.refresh_status()
+        except Exception as e:
+            self.action_completed.emit("stop_supervisor", False, f"Failed to stop supervisor: {e}")
+
     def _on_action_finished(self, exit_code: int, exit_status) -> None:
         success = exit_code == 0
         stderr_bytes = self._action_process.readAllStandardError().data()
