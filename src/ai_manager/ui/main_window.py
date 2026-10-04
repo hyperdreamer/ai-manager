@@ -28,10 +28,13 @@ from ai_manager.config.models import (
     UserSettings,
 )
 from ai_manager.config.yaml_manager import read_app_config, write_app_config
+from ai_manager.services.desktop_integration import DesktopIntegrationService
 from ai_manager.services.model_fetcher import ModelFetchWorker
 from ai_manager.services.supervisor import SupervisorManager
 from ai_manager.ui.app_detail_view import AppDetailView
 from ai_manager.ui.app_sidebar import AppSidebar
+from ai_manager.ui.settings_dialog import SettingsDialog
+from ai_manager.ui.system_tray import SystemTrayManager
 from ai_manager.ui.theme import get_stylesheet
 from ai_manager.utils.path_locator import find_ai_workspace_root
 
@@ -66,7 +69,12 @@ def save_user_settings(settings: UserSettings) -> None:
 class MainWindow(QMainWindow):
     """Main window orchestrating sidebar, views, polling and supervisor."""
 
-    def __init__(self, workspace_root: Optional[Path] = None, parent: Optional[QWidget] = None):
+    def __init__(
+        self,
+        workspace_root: Optional[Path] = None,
+        parent: Optional[QWidget] = None,
+        start_minimized_override: bool = False,
+    ):
         super().__init__(parent)
         self.workspace_root = workspace_root or find_ai_workspace_root()
         self.apps = get_managed_apps(self.workspace_root)
@@ -75,11 +83,32 @@ class MainWindow(QMainWindow):
         # State storage
         self._saved_configs: Dict[str, AppAIConfig] = {}
         self._draft_configs: Dict[str, AppAIConfig] = {}
+        self._force_quit = False
 
         self.thread_pool = QThreadPool.globalInstance()
         self.supervisor_manager = SupervisorManager(self.workspace_root, self)
         self.supervisor_manager.status_updated.connect(self._on_supervisor_status)
         self.supervisor_manager.action_completed.connect(self._on_supervisor_action)
+
+        # Desktop integration + system tray
+        self.desktop_service = DesktopIntegrationService(self.workspace_root)
+        self.tray_manager = SystemTrayManager(self)
+        self.tray_manager.toggle_window_requested.connect(self.toggle_window_visibility)
+        self.tray_manager.start_all_services_requested.connect(
+            self.supervisor_manager.start_supervisor
+        )
+        self.tray_manager.stop_all_services_requested.connect(
+            self.supervisor_manager.stop_supervisor
+        )
+        self.tray_manager.open_settings_requested.connect(self.open_settings_dialog)
+        self.tray_manager.quit_requested.connect(self.handle_quit)
+        if self.tray_manager.is_available():
+            self.tray_manager.show()
+
+        # Runtime-only override; never persisted to settings.json.
+        self.is_minimized_at_startup = bool(
+            self.settings.start_minimized or start_minimized_override
+        )
 
         self._init_ui()
         self._load_all_configs()
@@ -133,6 +162,12 @@ class MainWindow(QMainWindow):
         self._theme_btn.setText("🌙 Dark" if self.settings.theme == ThemeMode.DARK else "☀️ Light")
         self._theme_btn.clicked.connect(self._toggle_theme)
         toolbar.addWidget(self._theme_btn)
+
+        # Settings
+        self._settings_btn = QToolButton(self)
+        self._settings_btn.setText("⚙ Settings")
+        self._settings_btn.clicked.connect(self.open_settings_dialog)
+        toolbar.addWidget(self._settings_btn)
 
         # Central Widget & Splitter
         central = QWidget(self)
@@ -292,6 +327,53 @@ class MainWindow(QMainWindow):
             qapp.setPalette(palette)
         self._theme_btn.setText("🌙 Dark" if theme == ThemeMode.DARK else "☀️ Light")
 
+    def toggle_window_visibility(self) -> None:
+        """Show/activate the window, or hide it when it is already focused."""
+        if self.isVisible() and not self.isMinimized() and self.isActiveWindow():
+            self.hide()
+        else:
+            # Unminimize and activate reliably on KDE Plasma / Wayland / X11
+            self.setWindowState(
+                (self.windowState() & ~Qt.WindowState.WindowMinimized)
+                | Qt.WindowState.WindowActive
+            )
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+
+    def open_settings_dialog(self) -> None:
+        """Open the modal application settings dialog."""
+        dialog = SettingsDialog(self.settings, self.desktop_service, parent=self)
+        dialog.settings_saved.connect(self._on_settings_saved)
+        dialog.exec()
+
+    def _on_settings_saved(self, new_settings: UserSettings) -> None:
+        """Apply settings live and persist them once."""
+        self.settings = new_settings
+        save_user_settings(self.settings)
+        self._poll_timer.setInterval(new_settings.poll_interval_ms)
+        # _apply_theme also persists, which is harmless and idempotent.
+        self._apply_theme(new_settings.theme)
+
+    def handle_quit(self) -> None:
+        """Quit the application, guarding against unsaved drafts."""
+        if self.has_unsaved_changes():
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                "You have unsaved changes. Discard and exit?",
+                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if reply != QMessageBox.StandardButton.Discard:
+                return
+        self._force_quit = True
+        self.close()
+        QApplication.instance().quit()
+
     def has_unsaved_changes(self) -> bool:
         for app_id, saved in self._saved_configs.items():
             draft = self._draft_configs.get(app_id)
@@ -300,6 +382,23 @@ class MainWindow(QMainWindow):
         return False
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._force_quit:
+            event.accept()
+            return
+
+        if self.settings.close_to_tray and self.tray_manager.is_available():
+            event.ignore()
+            self.hide()
+            if not self.settings.first_close_notice_shown:
+                self.tray_manager.show_message(
+                    "ai-manager running in tray",
+                    "The application will keep supervising services in the background.\n"
+                    "Click the tray icon to restore or quit.",
+                )
+                self.settings.first_close_notice_shown = True
+                save_user_settings(self.settings)
+            return
+
         if self.has_unsaved_changes():
             reply = QMessageBox.question(
                 self,
