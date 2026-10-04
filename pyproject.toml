@@ -24,3 +24,6 @@ dev = [
 [project.scripts]
 ai-manager = "ai_manager.main:main"
 
+[tool.setuptools.package-data]
+ai_manager = ["resources/icons/*.svg"]
+

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from ai_manager.resources import assets
 from ai_manager.utils.path_locator import find_ai_workspace_root
 
 APP_DESKTOP_DIR = Path.home() / ".local" / "share" / "applications"
@@ -43,6 +44,8 @@ class DesktopIntegrationService:
 
     def generate_desktop_entry(self, start_minimized: bool = False) -> str:
         """Returns FreeDesktop compliant .desktop file content."""
+        icon_path = assets.asset_path("color")
+        icon_value = str(icon_path) if icon_path is not None else "applications-development"
         lines = [
             "[Desktop Entry]",
             "Type=Application",
@@ -51,7 +54,7 @@ class DesktopIntegrationService:
             "Comment=Configure AI models and supervise local AI backend services",
             f"Exec={self.get_launcher_command(start_minimized)}",
             f"Path={self.workspace_root}",
-            "Icon=utilities-system-monitor",
+            f"Icon={icon_value}",
             "Terminal=false",
             "Categories=Development;Utility;Settings;",
             "StartupNotify=true",

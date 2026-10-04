@@ -5,8 +5,10 @@ probe is monkeypatched and the tray icon itself is stubbed where needed.
 """
 
 import pytest
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QSystemTrayIcon
 
+from ai_manager.ui import system_tray
 from ai_manager.ui.system_tray import SystemTrayManager
 
 
@@ -113,3 +115,18 @@ def test_show_and_hide_delegate_to_tray_icon(monkeypatch, manager):
     manager.hide()
 
     assert calls == ["show", "hide"]
+
+
+def test_tray_icon_is_not_null_after_construction(manager):
+    assert manager._tray_icon.icon().isNull() is False
+
+
+def test_palette_changed_reapplies_icon(qapp, monkeypatch, manager):
+    calls = []
+    monkeypatch.setattr(
+        system_tray, "tray_icon", lambda app=None: calls.append(app) or QIcon()
+    )
+
+    qapp.paletteChanged.emit(qapp.palette())
+
+    assert len(calls) == 1

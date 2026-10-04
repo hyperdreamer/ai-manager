@@ -9,6 +9,7 @@ server state.
 from typing import Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
+from PyQt6.QtGui import QPalette
 from PyQt6.QtWidgets import (
     QApplication,
     QMenu,
@@ -16,6 +17,8 @@ from PyQt6.QtWidgets import (
     QSystemTrayIcon,
     QWidget,
 )
+
+from ai_manager.ui.icons import tray_icon
 
 
 class SystemTrayManager(QObject):
@@ -39,6 +42,9 @@ class SystemTrayManager(QObject):
         self._tray_icon = QSystemTrayIcon(parent)
         self._context_menu = QMenu(parent)
         self._init_ui()
+        app = QApplication.instance()
+        if app is not None:
+            app.paletteChanged.connect(self._on_palette_changed)
 
     def _init_ui(self) -> None:
         self._apply_icon()
@@ -76,14 +82,18 @@ class SystemTrayManager(QObject):
         self._tray_icon.activated.connect(self._on_activated)
 
     def _apply_icon(self) -> None:
-        """Best-effort icon resolution with a standard fallback."""
+        """Apply the palette-tinted symbolic icon with a standard fallback."""
         app = QApplication.instance()
         if app is None:
             return
-        icon = app.windowIcon()
+        icon = tray_icon(app)
         if icon.isNull():
             icon = app.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
         self._tray_icon.setIcon(icon)
+
+    def _on_palette_changed(self, palette: QPalette | None = None) -> None:
+        """Re-tint the tray icon when the application palette changes."""
+        self._apply_icon()
 
     def _on_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
