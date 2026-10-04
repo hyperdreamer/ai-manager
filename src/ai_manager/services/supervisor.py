@@ -88,7 +88,10 @@ class SupervisorManager(QObject):
         self.workspace_root = workspace_root
         self.executable = find_ai_backends_executable(workspace_root)
         self._status_process = QProcess(self)
-        self._status_process.readyReadStandardOutput.connect(self._on_status_output)
+        self._status_output_buffer = bytearray()
+        self._status_process.readyReadStandardOutput.connect(self._on_status_ready_read)
+        self._status_process.finished.connect(self._on_status_finished)
+        self._status_process.errorOccurred.connect(self._on_status_error)
 
         self._action_process = QProcess(self)
         self._action_process.finished.connect(self._on_action_finished)
@@ -97,12 +100,20 @@ class SupervisorManager(QObject):
     def refresh_status(self) -> None:
         """Runs `ai-backends status` asynchronously."""
         if self._status_process.state() == QProcess.ProcessState.NotRunning:
+            self._status_output_buffer.clear()
             self._status_process.start(self.executable, ["status"])
 
-    def _on_status_output(self) -> None:
-        raw_bytes = self._status_process.readAllStandardOutput().data()
-        output = raw_bytes.decode("utf-8", errors="replace")
+    def _on_status_ready_read(self) -> None:
+        self._status_output_buffer.extend(self._status_process.readAllStandardOutput().data())
+
+    def _on_status_finished(self, exit_code: int, exit_status) -> None:
+        output = self._status_output_buffer.decode("utf-8", errors="replace")
         status = parse_supervisor_status(output)
+        self.status_updated.emit(status)
+
+    def _on_status_error(self, error) -> None:
+        # If QProcess fails to start or crashes, emit stopped status
+        status = SupervisorStatus(is_running=False, supervisor_pid=None, services={})
         self.status_updated.emit(status)
 
     def restart_service(self, service_name: str) -> None:
