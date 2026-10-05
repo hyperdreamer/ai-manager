@@ -191,7 +191,7 @@ class AppDetailView(QWidget):
         self._save_only_btn = QPushButton("Save Config Only", self)
         self._save_only_btn.clicked.connect(lambda: self._emit_save(restart=False))
 
-        self._save_restart_btn = QPushButton("Save and Restart Services", self)
+        self._save_restart_btn = QPushButton("Save and Restart Service", self)
         self._save_restart_btn.setObjectName("primaryActionBtn")
         self._save_restart_btn.clicked.connect(lambda: self._emit_save(restart=True))
 
