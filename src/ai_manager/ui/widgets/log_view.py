@@ -115,6 +115,11 @@ class LogViewWidget(QWidget):
     # Public API
     # ------------------------------------------------------------------
 
+    @property
+    def service_id(self) -> str:
+        """The id of the service this view renders logs for (read-only)."""
+        return self._service_id
+
     def set_log_path(self, path: Optional[Union[str, Path]]) -> None:
         """Point the reader at a new target, preserving displayed history."""
         normalized = None if path is None else Path(os.fspath(path))
