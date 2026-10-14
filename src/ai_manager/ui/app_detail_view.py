@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import List, Optional
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
@@ -10,6 +11,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -24,8 +26,10 @@ from ai_manager.config.models import (
     ServiceStatus,
 )
 from ai_manager.config.presets import DEFAULT_PRESETS
+from ai_manager.services.supervisor import default_log_path
 from ai_manager.ui.mnemonic import escape_mnemonic
 from ai_manager.ui.widgets.api_key_input import ApiKeyInputWidget
+from ai_manager.ui.widgets.log_view import LogViewWidget
 from ai_manager.ui.widgets.model_combo import ModelComboBox
 from ai_manager.ui.widgets.status_badge import StatusBadge
 
@@ -46,8 +50,13 @@ class AppDetailView(QWidget):
         self._available_models: List[str] = []
         self._fetch_token = 0
         self._is_loading = False
+        self._known_log_path: Optional[str] = None
 
         self._init_ui()
+
+    @property
+    def log_view(self) -> LogViewWidget:
+        return self._log_view_widget
 
     def _init_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -177,7 +186,6 @@ class AppDetailView(QWidget):
         form_layout.addStretch(1)
 
         scroll.setWidget(content_widget)
-        main_layout.addWidget(scroll, stretch=1)
 
         # Footer Action Bar
         footer = QFrame(self)
@@ -200,7 +208,25 @@ class AppDetailView(QWidget):
         footer_layout.addWidget(self._save_only_btn)
         footer_layout.addWidget(self._save_restart_btn)
 
-        main_layout.addWidget(footer)
+        # Configuration page owns the form scroll area and the action footer.
+        config_page = QWidget(self)
+        config_layout = QVBoxLayout(config_page)
+        config_layout.setContentsMargins(0, 0, 0, 0)
+        config_layout.setSpacing(0)
+        config_layout.addWidget(scroll, stretch=1)
+        config_layout.addWidget(footer)
+
+        # Logs page is the live log view itself; QTabWidget reparents it.
+        self._log_view_widget = LogViewWidget(self.app_meta.id, self)
+        # The widget retains the id privately; mirror it publicly for tests
+        # and window integration while keeping the widget module untouched.
+        self._log_view_widget.service_id = self.app_meta.id
+
+        self._tabs = QTabWidget(self)
+        self._tabs.addTab(config_page, "Configuration")
+        self._tabs.addTab(self._log_view_widget, "Logs")
+        self._tabs.setCurrentIndex(0)
+        main_layout.addWidget(self._tabs, stretch=1)
 
     def load_config(self, config: AppAIConfig) -> None:
         self._is_loading = True
@@ -252,6 +278,15 @@ class AppDetailView(QWidget):
         )
 
     def update_service_status(self, status: ServiceStatus) -> None:
+        if status.log_path:
+            self._known_log_path = str(status.log_path)
+        if self._known_log_path is not None:
+            path = self._known_log_path
+        else:
+            fallback: Path = default_log_path(self.app_meta.id)
+            path = str(fallback)
+        self._log_view_widget.set_log_path(path)
+        self._log_view_widget.set_service_state(status.state)
         self._status_badge.set_status(status.state, status.pid)
 
     def set_available_models(self, models: List[str]) -> None:
