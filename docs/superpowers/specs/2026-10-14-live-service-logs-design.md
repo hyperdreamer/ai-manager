@@ -159,7 +159,7 @@ Contract:
 | A previously `UNREADABLE`/`MISSING` file becomes readable again | `status=OK`; reading resumes from the retained offset, and `reset` stays `None` unless the file was genuinely new or reappeared |
 | First successful read of a target | seek to `max(0, size - initial_bytes)`; when starting mid-file, drop the first partial line; `status=OK, reset="created"` |
 | `size == offset` and `mtime_ns` unchanged | `([], OK)` — the common case, one `stat` only |
-| `size == offset` but `mtime_ns` changed | Rewritten in place at equal size: reset to 0 via the initial-read rule, `reset="truncated"` |
+| `size == offset` but `mtime_ns` changed | Rewritten in place at equal size: reset via the initial-read rule (trailing `initial_bytes` window), `reset="truncated"` |
 | `size < offset` | Truncated: reset to `max(0, size - initial_bytes)` via the initial-read rule, `reset="truncated"` |
 | `st_ino`/`st_dev` changed (rotated) | Same as truncation but `reset="rotated"` |
 | File missing, previously OK | `MISSING` (with `error`) for the first time and on every subsequent poll while absent |
@@ -249,7 +249,8 @@ Contents and behaviour:
   | `PRESENT` | no | batch `UNREADABLE` | `⚠ Log unreadable: <reason>` |
 
   A read-observed `UNREADABLE` clears only on a successful read of the same file
-  identity, or when the identity changes (a replaced file is a fresh subject), so a
+  identity, or on a successful read after the identity changes (a replaced file is a
+  fresh subject), so a
   paused `PRESENT` probe can never mask a real read error. On a chip change the view
   renders exactly one placeholder line for `MISSING`, `UNREADABLE` or `UNSET`
   (`Log file not found: <path>`, `Cannot read log file: <reason>`, `No log file
