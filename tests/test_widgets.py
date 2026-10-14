@@ -13,6 +13,25 @@ def test_theme_stylesheets():
     assert "background-color: #ffffff" in light_css
 
 
+def test_log_theme_selectors_are_present():
+    required = [
+        "QTabWidget::pane", "QTabBar::tab", "QTabBar::tab:hover",
+        "QTabBar::tab:selected", "QPlainTextEdit#logView",
+        "QLabel#logStatusChip", "QLabel#logServiceState", "QLabel#logLineCounter",
+    ]
+    dark_css = get_stylesheet(ThemeMode.DARK)
+    light_css = get_stylesheet(ThemeMode.LIGHT)
+    for selector in required:
+        assert selector in dark_css
+        assert selector in light_css
+    assert "background-color: #121217" in dark_css
+    assert "color: #d4d4d8" in dark_css
+    assert "background-color: #ffffff" in light_css
+    assert "color: #1e293b" in light_css
+    assert "#93c5fd" in dark_css
+    assert "#2563eb" in light_css
+
+
 def test_status_badge(qtbot):
     badge = StatusBadge()
     qtbot.addWidget(badge)

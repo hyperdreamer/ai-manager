@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import MagicMock
 
 from ai_manager.config.models import ServiceRunState
@@ -67,3 +68,13 @@ def test_stop_supervisor_runs_stop_command(qtbot, monkeypatch, tmp_path):
     assert recorded["args"][1:] == ["stop"]
     assert recorded["kwargs"].get("start_new_session") is True
     assert recorded.get("refreshed") is True
+
+
+def test_default_log_path_uses_cache_logs_directory(monkeypatch, tmp_path):
+    from ai_manager.services.supervisor import default_log_path
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    result = default_log_path("textkit")
+    assert result == (
+        tmp_path / ".cache" / "ai-backends" / "logs" / "textkit.log"
+    )
+    assert not result.parent.exists()

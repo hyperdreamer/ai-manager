@@ -154,3 +154,11 @@ class SupervisorManager(QObject):
             msg = stdout_bytes.decode("utf-8", errors="replace").strip()
         self.action_completed.emit(self._current_action, success, msg or f"Exited with code {exit_code}")
         self.refresh_status()
+
+
+def default_log_path(service_id: str) -> Path:
+    """Return ~/.cache/ai-backends/logs/<service_id>.log.
+
+    Used only when no log_path has ever been reported for this service.
+    """
+    return Path.home() / ".cache" / "ai-backends" / "logs" / f"{service_id}.log"

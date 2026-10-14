@@ -287,6 +287,53 @@ QFrame#footerActionBar {
     border-top: 1px solid #2a2a35;
     padding-top: 12px;
 }
+
+/* Service Log Viewer */
+QTabWidget::pane {
+    background-color: #20202a;
+    border: 1px solid #2e2e3d;
+    border-radius: 8px;
+}
+QTabBar::tab {
+    background-color: #262633;
+    color: #e2e8f0;
+    border: 1px solid #363647;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 5px 12px;
+    margin-right: 2px;
+}
+QTabBar::tab:hover {
+    background-color: #323244;
+    color: #ffffff;
+}
+QTabBar::tab:selected {
+    background-color: #20202a;
+    color: #93c5fd;
+    border-color: #93c5fd;
+}
+QPlainTextEdit#logView {
+    background-color: #121217;
+    color: #d4d4d8;
+    font-family: "DejaVu Sans Mono", "Liberation Mono", monospace;
+    border: 1px solid #2e2e3d;
+    border-radius: 6px;
+    padding: 6px;
+    selection-background-color: #2563eb;
+    selection-color: #ffffff;
+}
+QLabel#logStatusChip {
+    color: #94a3b8;
+    font-size: 11px;
+}
+QLabel#logServiceState {
+    color: #94a3b8;
+    font-size: 11px;
+}
+QLabel#logLineCounter {
+    color: #94a3b8;
+    font-size: 11px;
+}
 """
 
 LIGHT_QSS = """
@@ -573,6 +620,53 @@ QFrame#footerActionBar {
     background-color: #ffffff;
     border-top: 1px solid #f1f5f9;
     padding-top: 12px;
+}
+
+/* Service Log Viewer */
+QTabWidget::pane {
+    background-color: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+}
+QTabBar::tab {
+    background-color: #ffffff;
+    color: #334155;
+    border: 1px solid #cbd5e1;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    padding: 5px 12px;
+    margin-right: 2px;
+}
+QTabBar::tab:hover {
+    background-color: #f1f5f9;
+    color: #0f172a;
+}
+QTabBar::tab:selected {
+    background-color: #f8fafc;
+    color: #2563eb;
+    border-color: #2563eb;
+}
+QPlainTextEdit#logView {
+    background-color: #ffffff;
+    color: #1e293b;
+    font-family: "DejaVu Sans Mono", "Liberation Mono", monospace;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 6px;
+    selection-background-color: #2563eb;
+    selection-color: #ffffff;
+}
+QLabel#logStatusChip {
+    color: #64748b;
+    font-size: 11px;
+}
+QLabel#logServiceState {
+    color: #64748b;
+    font-size: 11px;
+}
+QLabel#logLineCounter {
+    color: #64748b;
+    font-size: 11px;
 }
 """
 
