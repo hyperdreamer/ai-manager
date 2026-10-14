@@ -1,0 +1,27 @@
+digraph live_service_logs_execution {
+    rankdir=LR;
+    node [shape=box, style=rounded, fontname="Helvetica"];
+    subgraph cluster_core {
+        label="core";
+        T-001 [label="Task 1: Implement LogTailReader and Its Unit Tests\nAdvanced"];
+    }
+    subgraph cluster_integration {
+        label="integration";
+        T-006 [label="Task 6: Add Configuration and Logs Tabs to AppDetailView\nStandard"];
+    }
+    subgraph cluster_logview {
+        label="logview";
+        T-005 [label="Task 5: Implement LogViewWidget and Its Qt Tests\nStandard"];
+    }
+    subgraph cluster_platform {
+        label="platform";
+        T-002 [label="Task 2: Add supervisor.default_log_path and Its Test\nFast"];
+        T-003 [label="Task 3: Add Log Theme QSS and Tests\nFast"];
+        T-004 [label="Task 4: Normalize Per-App Supervisor Status in MainWindow\nStandard"];
+    }
+    T-001 -> T-005;
+    T-002 -> T-003;
+    T-002 -> T-006;
+    T-003 -> T-004;
+    T-005 -> T-006;
+}

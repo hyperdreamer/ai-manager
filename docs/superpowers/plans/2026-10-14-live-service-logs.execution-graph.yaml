@@ -1,0 +1,183 @@
+# PM execution manifest for the live-service-logs plan (epoch 1).
+# Derived by the PM from the validated source plan; never hand-edited.
+source_plan:
+  path: docs/superpowers/plans/2026-10-14-live-service-logs.md
+  sha256: 70d70cb4a67ed0bc91d4c4970c0332b0a497f9374425ec6bd7300c189af3d450
+  commit_oid: 0b69734ab86feb0cea54879f15eafa267805af97
+topic_slug: live-service-logs
+epoch: 1
+lanes:
+  - id: core
+    owns: ["src/ai_manager/services/log_tailer.py", "tests/test_log_tailer.py"]
+    task_ids: [T-001]
+  - id: integration
+    owns: ["src/ai_manager/ui/app_detail_view.py", "tests/test_app_views.py"]
+    task_ids: [T-006]
+  - id: logview
+    owns: ["src/ai_manager/ui/widgets/log_view.py", "tests/test_log_view.py"]
+    task_ids: [T-005]
+  - id: platform
+    owns: ["src/ai_manager/services/supervisor.py", "src/ai_manager/ui/main_window.py", "src/ai_manager/ui/theme.py", "tests/test_main_window.py", "tests/test_supervisor.py", "tests/test_widgets.py"]
+    task_ids: [T-002, T-003, T-004]
+tasks:
+  - id: T-001
+    plan_task: 1
+    title: "Implement LogTailReader and Its Unit Tests"
+    tier: advanced
+    lane: core
+    sequence: 1
+    depends_on: []
+    owns: ["src/ai_manager/services/log_tailer.py", "tests/test_log_tailer.py"]
+    resources: []
+    produces: [IF-001]
+    consumes: []
+    validation:
+      - argv: ["/home/guest/anaconda3/envs/daily/bin/python", "-m", "pytest", "tests/test_log_tailer.py", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src", AI_WORKSPACE_ROOT: "/data/home/guest/Development/ai"}
+        timeout_seconds: 600
+  - id: T-002
+    plan_task: 2
+    title: "Add supervisor.default_log_path and Its Test"
+    tier: fast
+    lane: platform
+    sequence: 1
+    depends_on: []
+    owns: ["src/ai_manager/services/supervisor.py", "tests/test_supervisor.py"]
+    resources: []
+    produces: [IF-002]
+    consumes: []
+    validation:
+      - argv: ["/home/guest/anaconda3/envs/daily/bin/python", "-m", "pytest", "tests/test_supervisor.py", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src", AI_WORKSPACE_ROOT: "/data/home/guest/Development/ai"}
+        timeout_seconds: 600
+  - id: T-003
+    plan_task: 3
+    title: "Add Log Theme QSS and Tests"
+    tier: fast
+    lane: platform
+    sequence: 2
+    depends_on: [T-002]
+    owns: ["src/ai_manager/ui/theme.py", "tests/test_widgets.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/home/guest/anaconda3/envs/daily/bin/python", "-m", "pytest", "tests/test_widgets.py", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src", AI_WORKSPACE_ROOT: "/data/home/guest/Development/ai"}
+        timeout_seconds: 600
+  - id: T-004
+    plan_task: 4
+    title: "Normalize Per-App Supervisor Status in MainWindow"
+    tier: standard
+    lane: platform
+    sequence: 3
+    depends_on: [T-003]
+    owns: ["src/ai_manager/ui/main_window.py", "tests/test_main_window.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/home/guest/anaconda3/envs/daily/bin/python", "-m", "pytest", "tests/test_main_window.py", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src", AI_WORKSPACE_ROOT: "/data/home/guest/Development/ai"}
+        timeout_seconds: 600
+  - id: T-005
+    plan_task: 5
+    title: "Implement LogViewWidget and Its Qt Tests"
+    tier: standard
+    lane: logview
+    sequence: 1
+    depends_on: [T-001]
+    owns: ["src/ai_manager/ui/widgets/log_view.py", "tests/test_log_view.py"]
+    resources: []
+    produces: [IF-003]
+    consumes: [IF-001]
+    validation:
+      - argv: ["/home/guest/anaconda3/envs/daily/bin/python", "-m", "pytest", "tests/test_log_view.py", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src", AI_WORKSPACE_ROOT: "/data/home/guest/Development/ai"}
+        timeout_seconds: 600
+  - id: T-006
+    plan_task: 6
+    title: "Add Configuration and Logs Tabs to AppDetailView"
+    tier: standard
+    lane: integration
+    sequence: 1
+    depends_on: [T-002, T-005]
+    owns: ["src/ai_manager/ui/app_detail_view.py", "tests/test_app_views.py"]
+    resources: []
+    produces: [IF-004]
+    consumes: [IF-002, IF-003]
+    validation:
+      - argv: ["/home/guest/anaconda3/envs/daily/bin/python", "-m", "pytest", "tests/test_app_views.py", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src", AI_WORKSPACE_ROOT: "/data/home/guest/Development/ai"}
+        timeout_seconds: 600
+      - argv: ["/home/guest/anaconda3/envs/daily/bin/python", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src", AI_WORKSPACE_ROOT: "/data/home/guest/Development/ai"}
+        timeout_seconds: 1200
+produces:
+  - id: IF-001
+    producer: T-001
+    signature: "LogFileStatus{UNSET,OK,MISSING,UNREADABLE}; FilePresence{UNSET,MISSING,PRESENT,UNAVAILABLE}; LogReadBatch(lines: list[str], status: LogFileStatus, reset: 'created'|'truncated'|'rotated'|None, error: str|None, more_pending: bool); LogTailReader(initial_bytes: int = 65536, max_batch_bytes: int = 262144, max_line_bytes: int = 16384) .set_path(path: str|Path|None) -> bool .probe_health() -> tuple[FilePresence, str|None] .read_new_lines() -> LogReadBatch; module-level _open_file(path)"
+    sha256: 6e9c445ebed7dbc6a02f35c69eb3613791a3cfd888e05925cbbb57355b05ddc5
+  - id: IF-002
+    producer: T-002
+    signature: "default_log_path(service_id: str) -> pathlib.Path  # Path.home()/'.cache'/'ai-backends'/'logs'/f'{service_id}.log'"
+    sha256: 1173f172a1135df97c00942d6c741a4b83230b1e8a07aac72f2afb643202c31f
+  - id: IF-003
+    producer: T-005
+    signature: "LogViewWidget(service_id: str, parent: QWidget|None = None) with LOG_POLL_INTERVAL_MS = 1000, MAX_LINES = 5000, MAX_READS_PER_TICK = 4, self._reader: LogTailReader, self.logView: QPlainTextEdit(objectName='logView'); set_log_path(path: str|Path|None) -> None; set_service_state(state: ServiceRunState) -> None; set_paused(paused: bool) -> None; set_follow(follow: bool) -> None; clear_view() -> None; poll_once() -> None; is_polling -> bool"
+    sha256: b2587634b0483252d7c3779c61aaaf84677081cb660d2760b2b485aa0f2f20f3
+  - id: IF-004
+    producer: T-006
+    signature: "AppDetailView.log_view -> LogViewWidget; AppDetailView.update_service_status(status: ServiceStatus) -> None (remembers _known_log_path, forwards set_log_path/set_service_state, keeps StatusBadge)"
+    sha256: 77857df2bec23b752e4ed739e0d064ca9dba246ca0e157e2ec0f459304a0ab1b
+consumes:
+  - id: IF-001
+    consumers: [T-005]
+    signature: "LogFileStatus{UNSET,OK,MISSING,UNREADABLE}; FilePresence{UNSET,MISSING,PRESENT,UNAVAILABLE}; LogReadBatch(lines: list[str], status: LogFileStatus, reset: 'created'|'truncated'|'rotated'|None, error: str|None, more_pending: bool); LogTailReader(initial_bytes: int = 65536, max_batch_bytes: int = 262144, max_line_bytes: int = 16384) .set_path(path: str|Path|None) -> bool .probe_health() -> tuple[FilePresence, str|None] .read_new_lines() -> LogReadBatch; module-level _open_file(path)"
+    sha256: 6e9c445ebed7dbc6a02f35c69eb3613791a3cfd888e05925cbbb57355b05ddc5
+  - id: IF-002
+    consumers: [T-006]
+    signature: "default_log_path(service_id: str) -> pathlib.Path  # Path.home()/'.cache'/'ai-backends'/'logs'/f'{service_id}.log'"
+    sha256: 1173f172a1135df97c00942d6c741a4b83230b1e8a07aac72f2afb643202c31f
+  - id: IF-003
+    consumers: [T-006]
+    signature: "LogViewWidget(service_id: str, parent: QWidget|None = None) with LOG_POLL_INTERVAL_MS = 1000, MAX_LINES = 5000, MAX_READS_PER_TICK = 4, self._reader: LogTailReader, self.logView: QPlainTextEdit(objectName='logView'); set_log_path(path: str|Path|None) -> None; set_service_state(state: ServiceRunState) -> None; set_paused(paused: bool) -> None; set_follow(follow: bool) -> None; clear_view() -> None; poll_once() -> None; is_polling -> bool"
+    sha256: b2587634b0483252d7c3779c61aaaf84677081cb660d2760b2b485aa0f2f20f3
+interfaces:
+  produces:
+    - id: IF-001
+      producer: T-001
+      signature: "LogFileStatus{UNSET,OK,MISSING,UNREADABLE}; FilePresence{UNSET,MISSING,PRESENT,UNAVAILABLE}; LogReadBatch(lines: list[str], status: LogFileStatus, reset: 'created'|'truncated'|'rotated'|None, error: str|None, more_pending: bool); LogTailReader(initial_bytes: int = 65536, max_batch_bytes: int = 262144, max_line_bytes: int = 16384) .set_path(path: str|Path|None) -> bool .probe_health() -> tuple[FilePresence, str|None] .read_new_lines() -> LogReadBatch; module-level _open_file(path)"
+      sha256: 6e9c445ebed7dbc6a02f35c69eb3613791a3cfd888e05925cbbb57355b05ddc5
+    - id: IF-002
+      producer: T-002
+      signature: "default_log_path(service_id: str) -> pathlib.Path  # Path.home()/'.cache'/'ai-backends'/'logs'/f'{service_id}.log'"
+      sha256: 1173f172a1135df97c00942d6c741a4b83230b1e8a07aac72f2afb643202c31f
+    - id: IF-003
+      producer: T-005
+      signature: "LogViewWidget(service_id: str, parent: QWidget|None = None) with LOG_POLL_INTERVAL_MS = 1000, MAX_LINES = 5000, MAX_READS_PER_TICK = 4, self._reader: LogTailReader, self.logView: QPlainTextEdit(objectName='logView'); set_log_path(path: str|Path|None) -> None; set_service_state(state: ServiceRunState) -> None; set_paused(paused: bool) -> None; set_follow(follow: bool) -> None; clear_view() -> None; poll_once() -> None; is_polling -> bool"
+      sha256: b2587634b0483252d7c3779c61aaaf84677081cb660d2760b2b485aa0f2f20f3
+    - id: IF-004
+      producer: T-006
+      signature: "AppDetailView.log_view -> LogViewWidget; AppDetailView.update_service_status(status: ServiceStatus) -> None (remembers _known_log_path, forwards set_log_path/set_service_state, keeps StatusBadge)"
+      sha256: 77857df2bec23b752e4ed739e0d064ca9dba246ca0e157e2ec0f459304a0ab1b
+  consumes:
+    - id: IF-001
+      consumers: [T-005]
+      signature: "LogFileStatus{UNSET,OK,MISSING,UNREADABLE}; FilePresence{UNSET,MISSING,PRESENT,UNAVAILABLE}; LogReadBatch(lines: list[str], status: LogFileStatus, reset: 'created'|'truncated'|'rotated'|None, error: str|None, more_pending: bool); LogTailReader(initial_bytes: int = 65536, max_batch_bytes: int = 262144, max_line_bytes: int = 16384) .set_path(path: str|Path|None) -> bool .probe_health() -> tuple[FilePresence, str|None] .read_new_lines() -> LogReadBatch; module-level _open_file(path)"
+      sha256: 6e9c445ebed7dbc6a02f35c69eb3613791a3cfd888e05925cbbb57355b05ddc5
+    - id: IF-002
+      consumers: [T-006]
+      signature: "default_log_path(service_id: str) -> pathlib.Path  # Path.home()/'.cache'/'ai-backends'/'logs'/f'{service_id}.log'"
+      sha256: 1173f172a1135df97c00942d6c741a4b83230b1e8a07aac72f2afb643202c31f
+    - id: IF-003
+      consumers: [T-006]
+      signature: "LogViewWidget(service_id: str, parent: QWidget|None = None) with LOG_POLL_INTERVAL_MS = 1000, MAX_LINES = 5000, MAX_READS_PER_TICK = 4, self._reader: LogTailReader, self.logView: QPlainTextEdit(objectName='logView'); set_log_path(path: str|Path|None) -> None; set_service_state(state: ServiceRunState) -> None; set_paused(paused: bool) -> None; set_follow(follow: bool) -> None; clear_view() -> None; poll_once() -> None; is_polling -> bool"
+      sha256: b2587634b0483252d7c3779c61aaaf84677081cb660d2760b2b485aa0f2f20f3
