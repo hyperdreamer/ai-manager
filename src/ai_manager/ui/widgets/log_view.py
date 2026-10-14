@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import Optional, Tuple, Union
 
 from PyQt6.QtCore import QTimer, QUrl
-from PyQt6.QtGui import QDesktopServices, QFontDatabase, QTextCursor
+from PyQt6.QtGui import (
+    QDesktopServices,
+    QFontDatabase,
+    QTextBlockUserData,
+    QTextCursor,
+)
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -74,6 +79,14 @@ def _unreadable_texts(message: Optional[str]) -> Tuple[str, str]:
     return reason, f"{_READ_ERROR_PREFIX}{reason}"
 
 
+class _PlaceholderBlockData(QTextBlockUserData):
+    """Identity tag preventing a recycled cursor from matching log text."""
+
+    def __init__(self, token: int) -> None:
+        super().__init__()
+        self.token = token
+
+
 class LogViewWidget(QWidget):
     """Live log page for one service; polls a bounded incremental reader."""
 
@@ -99,6 +112,7 @@ class LogViewWidget(QWidget):
         self._health_key: Optional[Tuple[str, Optional[str]]] = None
         self._placeholder_cursor = None
         self._placeholder_text: Optional[str] = None
+        self._placeholder_token = 0
         self._pending_path_marker: Optional[str] = None
 
         self._build_ui()
@@ -132,6 +146,10 @@ class LogViewWidget(QWidget):
         self._reader.set_path(normalized)
         self._last_read_status = LogFileStatus.UNSET
         self._last_read_error = None
+        if normalized is None:
+            self._presence = FilePresence.UNSET
+            self._presence_reason = None
+            self._health_key = None
         has_history = previous is not None
         if normalized is not None and has_history:
             self._pending_path_marker = (
@@ -172,6 +190,7 @@ class LogViewWidget(QWidget):
         self.logView.clear()
         self._placeholder_cursor = None
         self._placeholder_text = None
+        self._placeholder_token = 0
         self._update_line_counter()
 
     def poll_once(self) -> None:
@@ -374,7 +393,10 @@ class LogViewWidget(QWidget):
         self.logView.appendPlainText(text)
         # Hold a live cursor (not a bare block handle): maximumBlockCount
         # trimming recycles stale QTextBlock handles onto other blocks.
-        self._placeholder_cursor = QTextCursor(self.logView.document().lastBlock())
+        block = self.logView.document().lastBlock()
+        self._placeholder_token += 1
+        block.setUserData(_PlaceholderBlockData(self._placeholder_token))
+        self._placeholder_cursor = QTextCursor(block)
         self._placeholder_text = text
         if self._follow:
             self.logView.moveCursor(QTextCursor.MoveOperation.End)
@@ -382,12 +404,19 @@ class LogViewWidget(QWidget):
     def _remove_placeholder(self) -> None:
         cursor = self._placeholder_cursor
         text = self._placeholder_text
+        token = self._placeholder_token
         self._placeholder_cursor = None
         self._placeholder_text = None
         if cursor is None or text is None:
             return
         block = cursor.block()
-        if not block.isValid() or block.text() != text:
+        data = block.userData() if block.isValid() else None
+        if (
+            not block.isValid()
+            or block.text() != text
+            or not isinstance(data, _PlaceholderBlockData)
+            or data.token != token
+        ):
             # The placeholder was already trimmed away; never touch real lines.
             return
         removal = QTextCursor(block)
@@ -413,7 +442,13 @@ class LogViewWidget(QWidget):
         if self._placeholder_cursor is None or self._placeholder_text is None:
             return False
         block = self._placeholder_cursor.block()
-        return block.isValid() and block.text() == self._placeholder_text
+        data = block.userData() if block.isValid() else None
+        return (
+            block.isValid()
+            and block.text() == self._placeholder_text
+            and isinstance(data, _PlaceholderBlockData)
+            and data.token == self._placeholder_token
+        )
 
     def _update_line_counter(self) -> None:
         document = self.logView.document()

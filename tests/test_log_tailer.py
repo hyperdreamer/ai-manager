@@ -309,13 +309,39 @@ def test_lt_05_initial_window_drops_leading_partial(tmp_path, recorded_reads):
     assert batch.reset == "created"
     assert batch.lines == ["tail-line"]
     assert batch.more_pending is False
-    assert recorded_reads == [20]
+    assert recorded_reads == [1, 20]
 
     small = tmp_path / "small.log"
     small.write_bytes(b"a\nb\n")
     reader2 = LogTailReader(initial_bytes=4096)
     reader2.set_path(small)
     assert reader2.read_new_lines().lines == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    ("contents", "initial_bytes", "expected"),
+    [
+        (b"a\nb\nc\n", 4, ["b", "c"]),
+        (b"a\nbb\nc\n", 4, ["c"]),
+    ],
+    ids=["starts-after-newline", "starts-mid-line"],
+)
+def test_reset_window_discards_only_when_starting_mid_line(
+    tmp_path, recorded_reads, contents, initial_bytes, expected
+):
+    path = tmp_path / "window.log"
+    path.write_bytes(contents)
+    reader = LogTailReader(
+        initial_bytes=initial_bytes, max_batch_bytes=4, max_line_bytes=64
+    )
+    reader.set_path(path)
+
+    batches, costs = drain_with_bounds(reader, recorded_reads)
+
+    assert batches[0].reset == "created"
+    assert collect_lines(batches) == expected
+    assert all(cost <= 4 for cost in costs)
+    assert all(size <= 4 for size in recorded_reads)
 
 
 def test_lt_06_batches_are_capped_and_drain_in_order(tmp_path, recorded_reads):
@@ -343,7 +369,7 @@ def test_lt_07_leading_partial_skip_counts_against_budget(tmp_path, recorded_rea
 
     batches, costs = drain_with_bounds(reader, recorded_reads)
     assert collect_lines(batches) == ["fresh"]
-    assert sum(costs) == 20
+    assert sum(costs) == 21  # reset window plus its one-byte boundary check
     assert all(cost <= 8 for cost in costs)
     assert len(batches) > 1
 
@@ -376,6 +402,35 @@ def test_lt_08_unchanged_metadata_performs_no_read(tmp_path, recorded_reads):
     assert batch.reset is None
     assert batch.error is None
     assert recorded_reads == []
+
+
+def test_unreadable_error_forces_validation_read_at_unchanged_eof(
+    tmp_path, recorded_reads, monkeypatch
+):
+    path = tmp_path / "svc.log"
+    path.write_bytes(b"hello\n")
+    reader = LogTailReader(initial_bytes=1024)
+    reader.set_path(path)
+    assert reader.read_new_lines().lines == ["hello"]
+    recorded_reads.clear()
+
+    real_stat = log_tailer.os.stat
+
+    def transient_stat_error(target, *args, **kwargs):
+        if os.fspath(target) == os.fspath(path):
+            raise PermissionError(13, "Permission denied")
+        return real_stat(target, *args, **kwargs)
+
+    monkeypatch.setattr(log_tailer.os, "stat", transient_stat_error)
+    unreadable = reader.read_new_lines()
+    assert unreadable.status is LogFileStatus.UNREADABLE
+    assert unreadable.error and "Permission denied" in unreadable.error
+
+    monkeypatch.setattr(log_tailer.os, "stat", real_stat)
+    recovered = reader.read_new_lines()
+
+    assert recovered == LogReadBatch([], LogFileStatus.OK)
+    assert recorded_reads == [1]
 
 
 # ---------------------------------------------------------------------------
@@ -475,8 +530,8 @@ def test_lt_11_identity_change_is_rotated_reset(tmp_path, recorded_reads):
     assert batches[0].status is LogFileStatus.OK
     assert batches[0].reset == "rotated"
     assert all(batch.reset is None for batch in batches[1:])
-    assert collect_lines(batches) == ["four"]
-    assert sum(costs) == 11
+    assert collect_lines(batches) == ["three", "four"]
+    assert sum(costs) == 12  # reset window plus its one-byte boundary check
     assert all(size <= 4 for size in recorded_reads)
 
 
@@ -567,7 +622,7 @@ def test_lt_16_created_window_drains_within_initial_bytes(tmp_path, recorded_rea
     assert batches[0].reset == "created"
     assert all(batch.reset is None for batch in batches[1:])
     assert collect_lines(batches) == lines[35:40]
-    assert sum(costs) == 59
+    assert sum(costs) == 60  # initial window plus its one-byte boundary check
     assert len(costs) > 1
     assert all(size <= 16 for size in recorded_reads)
     # the rest of the backlog outside the initial window is never re-read
@@ -590,7 +645,7 @@ def test_lt_16_truncation_window_drains_within_initial_bytes(tmp_path, recorded_
     assert batches[0].reset == "truncated"
     assert all(batch.reset is None for batch in batches[1:])
     assert collect_lines(batches) == lines[35:40]
-    assert sum(costs) == 59
+    assert sum(costs) == 60  # reset window plus its one-byte boundary check
     assert all(size <= 16 for size in recorded_reads)
 
 
@@ -611,7 +666,7 @@ def test_lt_16_rotation_window_drains_within_initial_bytes(tmp_path, recorded_re
     assert batches[0].reset == "rotated"
     assert all(batch.reset is None for batch in batches[1:])
     assert collect_lines(batches) == lines[35:40]
-    assert sum(costs) == 59
+    assert sum(costs) == 60  # reset window plus its one-byte boundary check
     assert all(size <= 16 for size in recorded_reads)
 
 

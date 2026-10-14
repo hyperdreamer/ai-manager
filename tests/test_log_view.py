@@ -126,6 +126,27 @@ def test_maximum_block_count_caps_display(qtbot):
     assert f"line {total - 1}" in view.logView.toPlainText()
 
 
+def test_evicted_placeholder_collision_does_not_delete_real_log_line(qtbot):
+    view, stub = make_view(qtbot)
+    missing_placeholder = "Log file not found: missing.log"
+    stub.presence = (FilePresence.MISSING, missing_placeholder)
+    view.set_log_path("missing.log")
+    view.poll_once()
+    assert _lines(view).count(missing_placeholder) == 1
+
+    stub.presence = (FilePresence.PRESENT, None)
+    real_lines = [missing_placeholder] + [
+        f"real line {index}" for index in range(LogViewWidget.MAX_LINES - 1)
+    ]
+    stub.batches.append(LogReadBatch(real_lines, status=LogFileStatus.OK))
+    view.poll_once()
+
+    assert view.logView.document().blockCount() == LogViewWidget.MAX_LINES
+    assert _lines(view)[0] == missing_placeholder
+    assert _lines(view).count(missing_placeholder) == 1
+    assert view._health_chip.text() == "● Live"
+
+
 def test_pause_prevents_consumption_and_resume_drains(qtbot):
     view, stub = make_view(qtbot)
     stub.presence = (FilePresence.PRESENT, None)
@@ -373,6 +394,26 @@ def test_read_error_survives_paused_present_probe(qtbot):
     assert view._health_chip.text() == "● Live"
     assert "Cannot read log file" not in view.logView.toPlainText()
     assert "log file created" not in view.logView.toPlainText()
+
+
+def test_clearing_resolved_path_resets_hidden_view_to_unset(qtbot):
+    view, stub = make_view(qtbot)
+    stub.presence = (FilePresence.PRESENT, None)
+    view.set_log_path("resolved.log")
+    stub.batches.append(LogReadBatch(["last real line"]))
+    view.poll_once()
+    assert view._health_chip.text() == "● Live"
+    assert "last real line" in view.logView.toPlainText()
+    assert view.is_polling is False
+    calls_before = (stub.probe_calls, stub.read_calls)
+
+    view.set_log_path(None)
+
+    assert view._target_path is None
+    assert view._health_chip.text() == "◌ No log path"
+    assert "No log file resolved yet" in view.logView.toPlainText()
+    assert "last real line" in view.logView.toPlainText()
+    assert (stub.probe_calls, stub.read_calls) == calls_before
 
 
 def test_read_observed_missing_while_paused_shows_paused(qtbot):

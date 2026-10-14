@@ -154,7 +154,26 @@ class LogTailReader:
         reset = self._classify_reset(identity, size, mtime_ns)
 
         if reset is None and size == self._offset:
-            # Unchanged metadata and consumption already at EOF: one stat only.
+            if self._last_error is None:
+                # Unchanged clean metadata: one stat only.
+                return LogReadBatch([], LogFileStatus.OK)
+
+            # A stat cannot validate recovery from an earlier read error. Probe
+            # the retained EOF with a bounded read before clearing that error.
+            try:
+                with _open_file(path) as handle:
+                    handle.seek(self._offset)
+                    handle.read(1)
+            except OSError as exc:
+                if exc.errno in _MISSING_ERRNOS:
+                    self._saw_missing = True
+                    error = _missing_message(path)
+                    self._last_error = error
+                    return LogReadBatch([], LogFileStatus.MISSING, error=error)
+                error = _error_message(exc)
+                self._last_error = error
+                return LogReadBatch([], LogFileStatus.UNREADABLE, error=error)
+
             self._last_error = None
             return LogReadBatch([], LogFileStatus.OK)
 
@@ -171,6 +190,12 @@ class LogTailReader:
         budget = self._max_batch_bytes
         try:
             with _open_file(path) as handle:
+                if reset is not None and offset > 0:
+                    handle.seek(offset - 1)
+                    preceding = handle.read(1)
+                    budget -= len(preceding)
+                    discarding = preceding != b"\n"
+
                 handle.seek(offset)
                 limit = size - offset
                 while budget > 0 and limit > 0:
