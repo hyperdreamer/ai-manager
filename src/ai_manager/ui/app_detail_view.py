@@ -218,9 +218,6 @@ class AppDetailView(QWidget):
 
         # Logs page is the live log view itself; QTabWidget reparents it.
         self._log_view_widget = LogViewWidget(self.app_meta.id, self)
-        # The widget retains the id privately; mirror it publicly for tests
-        # and window integration while keeping the widget module untouched.
-        self._log_view_widget.service_id = self.app_meta.id
 
         self._tabs = QTabWidget(self)
         self._tabs.addTab(config_page, "Configuration")
