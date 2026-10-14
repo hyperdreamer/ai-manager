@@ -126,6 +126,10 @@ class LogTailReader:
         Accepts str or Path (normalized with os.fspath). Changing the target resets
         offset, device/inode identity, partial line and error state."""
 
+    def probe_status(self) -> Tuple[LogFileStatus, Optional[str]]:
+        """stat-only health check used while paused. Never reads, never advances
+        the offset, never mutates state."""
+
     def read_new_lines(self) -> LogReadBatch:
         """Return up to max_batch_bytes of newly appended content."""
 ```
@@ -140,7 +144,8 @@ Contract:
 | --- | --- |
 | `path is None` | `LogReadBatch([], LogFileStatus.UNSET)` |
 | Path configured, file absent | `LogReadBatch([], MISSING, error=<path>)`; repeats on every poll until it appears |
-| File exists, open/read fails | `LogReadBatch([], UNREADABLE, error=<oserror reason>)` |
+| File exists, open/read fails | `LogReadBatch([], UNREADABLE, error=<oserror reason>)`; the offset is kept so a transient failure cannot duplicate output |
+| A previously `UNREADABLE`/`MISSING` file becomes readable again | `status=OK`; reading resumes from the retained offset, and `reset` stays `None` unless the file was genuinely new or reappeared |
 | First successful read of a target | seek to `max(0, size - initial_bytes)`; when starting mid-file, drop the first partial line; `status=OK, reset="created"` |
 | `size == offset` and `mtime_ns` unchanged | `([], OK)` — the common case, one `stat` only |
 | `size == offset` but `mtime_ns` changed | Rewritten in place at equal size: reset to 0 via the initial-read rule, `reset="truncated"` |
@@ -159,6 +164,11 @@ uses the same two bounds: at most `max_batch_bytes` bytes are read per call, and
 reset never re-reads more than the trailing `initial_bytes`. There is no path that
 reads a whole log file. `more_pending` lets the view drain without a single huge
 batch.
+
+**Test seam.** Files are opened through a module-level `_open_file(path)` helper so
+tests can wrap the handle and record every `read(n)` call; byte bounds are asserted
+against those records instead of being inferred from returned lines (resolves
+review finding 13).
 
 **Stated, bounded limitation.** A truncate-and-regrow that completes inside one
 poll interval and ends past the previous offset is indistinguishable from an append
@@ -200,22 +210,27 @@ Contents and behaviour:
 - Toolbar row: file-health chip, `⏸ Pause` / `▶ Resume` toggle, `☑ Follow`
   checkbox (checked), `Open log file`, `Copy`, `Clear`; second muted line with the
   service state and the line counter (`"1 204 lines"`, `"5 000 lines (capped)"`).
-- `poll_once()` performs at most `MAX_READS_PER_TICK` reader calls, appending each
-  batch; `more_pending` is simply consumed on the next call within the same tick,
-  so a resumed backlog drains at ≤ 1 MiB per second and the UI thread never blocks
-  on a giant read.
+- `poll_once()` first calls `reader.probe_status()` on **every** tick, including
+  while paused, so the file-health chip is always current; then, unless paused, it
+  performs at most `MAX_READS_PER_TICK` reader calls, appending each batch.
+  `more_pending` is consumed on the next call within the same tick, so a resumed
+  backlog drains at ≤ 1 MiB per second and the UI thread never blocks on a giant
+  read. Pause therefore gates content only, never file health (resolves review
+  finding 11).
 - `reset` values render one plain-text marker line (`------ log rotated ------`,
   `------ log truncated ------`, `------ log file created ------`). Content is
   always **plain text** — log output is untrusted and is never parsed as HTML.
-- **File-health rendering (resolves finding 1).** `poll_once()` compares the batch
-  `status`/`error` with the last rendered state. On a change it updates the chip and
-  renders exactly one placeholder line for `MISSING`, `UNREADABLE` or `UNSET`
-  (`Log file not found: <path>`, `Cannot read log file: <reason>`, `No log file
-  resolved yet`), replacing a previous placeholder rather than stacking a new one.
-  A return to `OK` removes the placeholder and renders the `created` marker. The
-  status is re-evaluated on every poll, so a service that starts writing later
-  recovers with no user action. Errors are therefore surfaced once per transition,
-  not once per poll.
+- **File-health rendering (resolves findings 1 and 12).** `poll_once()` compares the
+  probed `status`/`error` with the last rendered state. On a change it updates the
+  chip and renders exactly one placeholder line for `MISSING`, `UNREADABLE` or
+  `UNSET` (`Log file not found: <path>`, `Cannot read log file: <reason>`, `No log
+  file resolved yet`), replacing a previous placeholder rather than stacking a new
+  one. A return to `OK` always removes the placeholder; a `------ log file created
+  ------` marker is rendered **only** when a batch carries `reset="created"`, so a
+  transient error clearing without a file change resumes output from the retained
+  offset with no misleading marker. Because the probe runs on every tick, a service
+  that starts writing later recovers with no user action. Errors are surfaced once
+  per transition, not once per poll.
 - **Path changes (resolves finding 6).** `set_log_path()` is deliberately
   **history-preserving**: existing lines stay in the view, and the reader is reset to
   the new target, so the next poll renders `------ log file changed: <path> ------`
@@ -268,12 +283,21 @@ design leaves the existing regex untouched (resolves finding 2).
 
 ### 3.5 Main window — `src/ai_manager/ui/main_window.py` (modified)
 
-`_on_supervisor_status` keeps its current shape for reported services and gains one
-loop: **every** managed app absent from `status.services` is forwarded a synthetic
-`ServiceStatus(service_id=app_id, state=ServiceRunState.UNKNOWN)` **to both the
-sidebar and the detail view** (resolves findings 2 and 7). `StatusBadge` already
-renders `UNKNOWN` as `Unknown`, so a stopped supervisor can no longer leave stale
-`Running` badges in the sidebar, the header, or the log tab's service line.
+`_on_supervisor_status` gains one normalization step before touching widgets
+(resolves findings 2, 7 and 10):
+
+- when `status.is_running` is `True`, a managed app absent from `status.services`
+  receives `ServiceStatus(service_id=app_id, state=ServiceRunState.UNKNOWN)`;
+- when `status.is_running` is `False`, **every** managed app receives that
+  synthetic `UNKNOWN`, because a stopped supervisor's service rows (which
+  `parse_supervisor_status` can still emit from residual output) are not
+  authoritative;
+- reported rows are echoed unchanged only while the supervisor is running.
+
+The resulting status is forwarded **to both the sidebar and the detail view**.
+`StatusBadge` already renders `UNKNOWN` as `Unknown`, so a stopped supervisor can no
+longer leave stale `Running` — or misleading `Stopped` — badges in the sidebar, the
+header, or the log tab's service line.
 
 ### 3.6 Theme — `src/ai_manager/ui/theme.py` (modified)
 
@@ -293,10 +317,10 @@ Add to both `DARK_QSS` and `LIGHT_QSS`:
 QTimer (1000 ms, only while Logs tab visible)
         │
         ▼
-LogViewWidget.poll_once()   ── up to 4 × read_new_lines() per tick ──┐
-        │                                                            │
-        │                          LogTailReader  ──stat/seek/read──► │  <log file>
-        │  LogReadBatch(lines, status, reset, error, more_pending) ◄──┘
+LogViewWidget.poll_once()   ── probe_status() every tick (stat only) ──┐
+        │                   ── unless paused: up to 4 × read_new_lines() │
+        │                          LogTailReader  ──stat/seek/read──►   │  <log file>
+        │  LogReadBatch(lines, status, reset, error, more_pending) ◄────┘
         ▼
 QPlainTextEdit.appendPlainText(line)          (cap 5 000 blocks)
         │
@@ -305,9 +329,9 @@ QPlainTextEdit.appendPlainText(line)          (cap 5 000 blocks)
         └─ if follow: move cursor to end
 
 SupervisorManager.refresh_status() ──poll_interval_ms (4 s, unchanged)──►
-  MainWindow._on_supervisor_status → for every managed app:
-    sidebar.update_status         (reported status, else synthetic UNKNOWN)
-    AppDetailView.update_service_status
+  MainWindow._on_supervisor_status → normalize, then for every managed app:
+    is_running ? (reported row, else synthetic UNKNOWN) : synthetic UNKNOWN
+    sidebar.update_status(status) + AppDetailView.update_service_status(status)
       → StatusBadge (unchanged) + LogViewWidget.set_service_state/set_log_path
 ```
 
@@ -321,7 +345,8 @@ incremental read at 1 s.
 | --- | --- |
 | Log path unknown and fallback file missing | Chip `⚠ Log file not found`, one placeholder line naming the path; re-checked every poll, so creating the file recovers automatically |
 | Permission denied / read error | Chip `⚠ Log unreadable: <reason>`, one placeholder line; repeated attempts do not spam the view |
-| Supervisor stopped | Muted line `service unknown`; the last known path is **retained** (never downgraded to the fallback) and still tailed if the file exists, because post-mortem output matters most |
+| Supervisor stopped (`is_running=False`) | Every service's muted line reads `service unknown` regardless of residual reported rows; the last known path is **retained** (never downgraded to the fallback) and still tailed if the file exists, because post-mortem output matters most |
+| File health changes while paused | The stat-only probe keeps the chip truthful (e.g. `⚠ Log file not found` appears while paused); content stays frozen until Resume |
 | Rotation / truncation / equal-size rewrite | Marker line in the view, reader restarts under the `initial_bytes` bound, no crash, no unbounded read |
 | Gigantic file | Initial and reset reads bounded by 64 KiB; each poll bounded by 256 KiB |
 | Backlog while paused | Drained at ≤ 1 MiB/s across ticks (`MAX_READS_PER_TICK`) |
@@ -343,16 +368,21 @@ never invoke `ai-backends`; log files are created under `tmp_path`.
   mtime) → `reset="truncated"`; inode change → `reset="rotated"`; partial trailing
   line held until `\n`; over-long line truncated once and remainder skipped;
   invalid UTF-8 replaced without raising; a > `max_batch_bytes` append returns
-  `more_pending=True` and drains across repeated calls without loss or duplication.
+  `more_pending=True` and drains across repeated calls without loss or duplication;
+  `probe_status()` never advances the offset (an append made while probing is still
+  delivered by the next read) and reports `MISSING`/`UNREADABLE` transitions; a
+  transient `UNREADABLE` that clears resumes from the retained offset with
+  `reset=None`.
 - **`tests/test_log_view.py` (new, Qt offscreen).** `poll_once` renders appended
   lines; `MAX_LINES` cap enforced through `maximumBlockCount`; Pause stops
   consumption and Resume delivers the backlog; Follow toggling changes auto-scroll
   without losing lines; `clear_view` empties the view and the next poll does not
   resurrect old output; marker lines for rotation; file-health chip transitions
-  (`OK`→`MISSING`→`OK`) render exactly one placeholder at a time; path switch keeps
-  history and adds the `log file changed` marker without mixing the two files'
-  offset state; service-state line and chip evolve independently (a status update
-  cannot clear a missing-file warning).
+  (`OK`→`MISSING`→`OK`) render exactly one placeholder at a time; while paused, a
+  deleted file still flips the chip to `⚠ Log file not found` and Resume then
+  delivers the backlog; path switch keeps history and adds the `log file changed`
+  marker without mixing the two files' offset state; service-state line and chip
+  evolve independently (a status update cannot clear a missing-file warning).
 - **`tests/test_app_views.py` (extended).** Each `AppDetailView` exposes exactly the
   `Configuration` and `Logs` tabs with `Configuration` default; toggling the
   split-model checkbox still yields the same draft (dirty state unaffected);
@@ -360,8 +390,14 @@ never invoke `ai-backends`; log files are created under `tmp_path`.
   with the fallback on a later status lacking one.
 - **`tests/test_main_window.py` (extended).** A supervisor status routed through
   `_on_supervisor_status` reaches the per-app log view; a status payload that omits
-  an app sends synthetic `UNKNOWN` to **both** the sidebar and the detail view
-  (stale `Running` is cleared).
+  an app while the supervisor runs sends synthetic `UNKNOWN` to **both** the sidebar
+  and the detail view; a payload with `is_running=False` that still carries service
+  rows sends `UNKNOWN` for every managed app.
+- **I/O bounds (resolves finding 13).** Tests monkeypatch the reader's `_open_file`
+  seam to record every `read(n)` size and assert `max(sizes) <= max_batch_bytes` for
+  initial reads, rotation/truncation resets and backlog drains; and monkeypatch
+  `view._reader.read_new_lines` to assert the call count per `poll_once()` never
+  exceeds `MAX_READS_PER_TICK`.
 - **Visibility (resolves finding 8).** Polling gating is tested in a real
   hierarchy, not a bare `show()`/`hide()`: build a `QTabWidget` whose second page is
   the log view, assert `is_polling` is `False` on the Configuration page and `True`
@@ -405,3 +441,7 @@ never invoke `ai-backends`; log files are created under `tmp_path`.
 | 7 | Minor: sidebar stale Running for absent services | §3.5 synthetic UNKNOWN to both sidebar and detail view; §6 test |
 | 8 | Minor: show/hide test does not prove tab gating | §6 real `QTabWidget`/`QStackedWidget` visibility test |
 | 9 | Minor: screenshot compatibility claim | §7 narrowed to the QSS contract; layout change acknowledged |
+| 10 | Blocker (attempt 3): inactive supervisor could still render reported `stopped` rows | §3.5 normalization: `is_running=False` forces synthetic `UNKNOWN` for every managed app; §5 table updated; §6 test |
+| 11 | Major (attempt 3): paused view cannot detect file-health changes | §3.1 `probe_status()` stat-only API; §3.2 probe runs every tick, pause gates content only; §6 tests |
+| 12 | Major (attempt 3): transient `UNREADABLE` clearing wrongly implied a `created` marker | §3.1 recovery keeps the offset with `reset=None`; §3.2 marker only on `reset="created"`; §6 test |
+| 13 | Major (attempt 3): tests could not prove the I/O bounds | §3.1 `_open_file` instrumentation seam; §6 test asserts per-call byte maxima and per-tick call counts |
