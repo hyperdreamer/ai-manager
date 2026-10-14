@@ -1,8 +1,8 @@
 """Qt tests for the bounded live service log view.
 
 The view consumes the reader's bounded ``LogReadBatch`` objects and renders
-untrusted log text as plain text only.  Reader behaviour is exercised through
-the required ``view._reader`` seam so these tests never touch the filesystem.
+untrusted log text as plain text only.  Most tests substitute the reader seam;
+viewport regressions use the real reader and temporary log files.
 """
 
 from __future__ import annotations
@@ -73,6 +73,31 @@ def make_view(qtbot):
     stub = StubReader()
     view._reader = stub
     return view, stub
+
+
+@pytest.fixture
+def filled_real_log_view(qtbot, tmp_path):
+    """Render more than one viewport through the production reader and poll."""
+    log_path = tmp_path / "service.log"
+    log_path.write_text(
+        "".join(f"line {index}\n" for index in range(200)),
+        encoding="utf-8",
+    )
+    view = LogViewWidget("svc")
+    qtbot.addWidget(view)
+    view.set_log_path(log_path)
+    view.resize(400, 150)
+    view.show()
+    qtbot.waitExposed(view)
+    # Drive the public poll synchronously so a timer cannot race assertions.
+    view._poll_timer.stop()
+    view.poll_once()
+    QApplication.processEvents()
+
+    bar = view.logView.verticalScrollBar()
+    assert bar.maximum() > 0
+    assert bar.value() == bar.maximum()
+    return view, log_path
 
 
 def _lines(view):
@@ -205,6 +230,128 @@ def test_follow_controls_only_viewport(qtbot):
     assert view.logView.document().blockCount() == 251
     assert "final line" in view.logView.toPlainText()
     assert "line 0" in view.logView.toPlainText()
+
+
+@pytest.mark.parametrize("follow", [False, True], ids=["follow-off", "follow-on"])
+def test_follow_controls_bottom_viewport_with_real_reader(
+    filled_real_log_view, follow
+):
+    view, log_path = filled_real_log_view
+    bar = view.logView.verticalScrollBar()
+    view.set_follow(follow)
+    assert view._follow_check.isChecked() is follow
+    bar.setValue(bar.maximum())
+    QApplication.processEvents()
+    before_append = bar.value()
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write("".join(f"later {index}\n" for index in range(20)))
+    view.poll_once()
+    QApplication.processEvents()
+
+    assert bar.maximum() > before_append
+    assert "later 19" in _lines(view)
+    if follow:
+        assert bar.value() == bar.maximum()
+        assert view.logView.textCursor().atEnd()
+    else:
+        assert bar.value() == before_append
+
+
+@pytest.mark.parametrize("change", ["truncated", "rotated", "path_changed"])
+def test_follow_off_preserves_viewport_when_markers_are_inserted(
+    filled_real_log_view, change
+):
+    view, log_path = filled_real_log_view
+    view.set_follow(False)
+    bar = view.logView.verticalScrollBar()
+    bar.setValue(bar.maximum())
+    before_change = bar.value()
+
+    if change == "rotated":
+        log_path.rename(log_path.with_suffix(".old"))
+    elif change == "path_changed":
+        log_path = log_path.with_name("other.log")
+    log_path.write_text("replacement output\n", encoding="utf-8")
+    if change == "path_changed":
+        view.set_log_path(log_path)
+    view.poll_once()
+    QApplication.processEvents()
+
+    marker = (
+        f"------ log file changed: {log_path} ------"
+        if change == "path_changed"
+        else f"------ log {change} ------"
+    )
+    assert marker in _lines(view)
+    assert "replacement output" in _lines(view)
+    assert bar.maximum() > before_change
+    assert bar.value() == before_change
+
+
+@pytest.mark.parametrize("change", ["missing", "unset", "replace_missing", "recover"])
+def test_follow_off_preserves_viewport_during_placeholder_changes(
+    filled_real_log_view, change
+):
+    view, log_path = filled_real_log_view
+    if change in ("replace_missing", "recover"):
+        log_path.unlink()
+        view.poll_once()
+        QApplication.processEvents()
+        assert f"Log file not found: {log_path}" in _lines(view)
+
+    view.set_follow(False)
+    bar = view.logView.verticalScrollBar()
+    bar.setValue(bar.maximum())
+    before_change = bar.value()
+
+    if change == "unset":
+        view.set_log_path(None)
+        expected = "No log file resolved yet"
+    else:
+        if change == "missing":
+            log_path.unlink()
+        elif change == "replace_missing":
+            log_path = log_path.with_name("other-missing.log")
+            view.set_log_path(log_path)
+        else:
+            log_path.write_text("recovered output\n", encoding="utf-8")
+        view.poll_once()
+        expected = (
+            "recovered output"
+            if change == "recover"
+            else f"Log file not found: {log_path}"
+        )
+    QApplication.processEvents()
+
+    assert expected in _lines(view)
+    if change == "recover":
+        assert "------ log file created ------" in _lines(view)
+        assert "Log file not found:" not in view.logView.toPlainText()
+    assert bar.value() == before_change
+
+
+def test_follow_off_preserves_viewport_when_paused_placeholder_is_removed(
+    filled_real_log_view,
+):
+    view, log_path = filled_real_log_view
+    log_path.unlink()
+    view.poll_once()
+    view.set_paused(True)
+    assert f"Log file not found: {log_path}" in _lines(view)
+
+    view.set_follow(False)
+    bar = view.logView.verticalScrollBar()
+    # Removal shortens the scroll range; use a position valid in both ranges.
+    bar.setValue(bar.maximum() // 2)
+    before_removal = bar.value()
+    log_path.write_text("not consumed while paused\n", encoding="utf-8")
+    view.poll_once()
+    QApplication.processEvents()
+
+    assert "Log file not found:" not in view.logView.toPlainText()
+    assert "not consumed while paused" not in _lines(view)
+    assert bar.value() == before_removal
 
 
 def test_clear_view_does_not_reset_reader(qtbot):

@@ -8,8 +8,9 @@ it produces as *plain text*.  Log output is untrusted: it is appended with
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional, Tuple, Union
+from typing import Iterator, Optional, Tuple, Union
 
 from PyQt6.QtCore import QTimer, QUrl
 from PyQt6.QtGui import (
@@ -385,12 +386,15 @@ class LogViewWidget(QWidget):
             # Errors are surfaced once per transition, not once per poll.
             return
         self._health_key = key
-        self._remove_placeholder()
-        if placeholder is not None:
-            self._append_placeholder(placeholder)
+        # A replacement can temporarily shrink the scroll range; preserve the
+        # viewport across the whole transition as well as each text mutation.
+        with self._preserve_viewport():
+            self._remove_placeholder()
+            if placeholder is not None:
+                self._append_placeholder(placeholder)
 
     def _append_placeholder(self, text: str) -> None:
-        self.logView.appendPlainText(text)
+        self._append_line(text)
         # Hold a live cursor (not a bare block handle): maximumBlockCount
         # trimming recycles stale QTextBlock handles onto other blocks.
         block = self.logView.document().lastBlock()
@@ -398,8 +402,6 @@ class LogViewWidget(QWidget):
         block.setUserData(_PlaceholderBlockData(self._placeholder_token))
         self._placeholder_cursor = QTextCursor(block)
         self._placeholder_text = text
-        if self._follow:
-            self.logView.moveCursor(QTextCursor.MoveOperation.End)
 
     def _remove_placeholder(self) -> None:
         cursor = self._placeholder_cursor
@@ -419,24 +421,41 @@ class LogViewWidget(QWidget):
         ):
             # The placeholder was already trimmed away; never touch real lines.
             return
-        removal = QTextCursor(block)
-        removal.movePosition(
-            QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor
-        )
-        if removal.hasSelection():
-            removal.removeSelectedText()
-        else:
-            removal.select(QTextCursor.SelectionType.BlockUnderCursor)
-            removal.removeSelectedText()
+        with self._preserve_viewport():
+            removal = QTextCursor(block)
+            removal.movePosition(
+                QTextCursor.MoveOperation.NextBlock, QTextCursor.MoveMode.KeepAnchor
+            )
+            if removal.hasSelection():
+                removal.removeSelectedText()
+            else:
+                removal.select(QTextCursor.SelectionType.BlockUnderCursor)
+                removal.removeSelectedText()
 
     # ------------------------------------------------------------------
     # Rendering helpers
     # ------------------------------------------------------------------
 
-    def _append_line(self, text: str) -> None:
-        self.logView.appendPlainText(text)
+    @contextmanager
+    def _preserve_viewport(self) -> Iterator[None]:
+        """Prevent Qt's implicit scrolling during mutations with Follow off."""
         if self._follow:
-            self.logView.moveCursor(QTextCursor.MoveOperation.End)
+            yield
+            return
+        vertical = self.logView.verticalScrollBar()
+        horizontal = self.logView.horizontalScrollBar()
+        position = (vertical.value(), horizontal.value())
+        try:
+            yield
+        finally:
+            vertical.setValue(position[0])
+            horizontal.setValue(position[1])
+
+    def _append_line(self, text: str) -> None:
+        with self._preserve_viewport():
+            self.logView.appendPlainText(text)
+            if self._follow:
+                self.logView.moveCursor(QTextCursor.MoveOperation.End)
 
     def _placeholder_is_displayed(self) -> bool:
         if self._placeholder_cursor is None or self._placeholder_text is None:
