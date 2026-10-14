@@ -222,6 +222,10 @@ class LogTailReader:
             return "truncated"
         if size == self._offset and mtime_ns != self._mtime_ns:
             return "truncated"
+        if size == self._size and mtime_ns != self._mtime_ns:
+            # Equal-size in-place rewrite: a partial read may leave
+            # ``offset < size == self._size``, which the offset check misses.
+            return "truncated"
         return None
 
     def _consume(

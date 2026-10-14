@@ -406,6 +406,42 @@ def test_lt_09_equal_size_rewrite_is_truncated_reset(tmp_path, recorded_reads):
     assert all(size <= 7 for size in recorded_reads)
 
 
+def test_lt_09b_equal_size_rewrite_after_partial_read_is_truncated_reset(
+    tmp_path, recorded_reads
+):
+    path = tmp_path / "svc.log"
+    path.write_bytes(b"AAAA\nBBBB\nCCCC\n")
+    reader = LogTailReader(initial_bytes=4096, max_batch_bytes=8, max_line_bytes=64)
+    reader.set_path(path)
+
+    first = reader.read_new_lines()
+    assert first.status is LogFileStatus.OK
+    assert first.reset == "created"
+    assert first.lines == ["AAAA"]
+    assert first.more_pending is True
+    assert reader._offset < reader._size
+    assert reader._partial == b"BBB"
+
+    # Rewrite in place at the same size with a newer mtime_ns before the
+    # retained partial (old bytes) and backlog were drained.
+    old_mtime = path.stat().st_mtime_ns
+    path.write_bytes(b"1111\n2222\n3333\n")
+    os.utime(path, ns=(old_mtime + 1_000_000_000, old_mtime + 1_000_000_000))
+    assert path.stat().st_size == 15
+
+    recorded_reads.clear()
+    batches, costs = drain_with_bounds(reader, recorded_reads)
+    assert batches[0].status is LogFileStatus.OK
+    assert batches[0].reset == "truncated"
+    lines = collect_lines(batches)
+    assert lines == ["1111", "2222", "3333"]
+    # never a line splicing retained old bytes ("BBB") onto rewritten bytes
+    assert not any(fragment in line for line in lines for fragment in ("AAA", "BBB", "CCC"))
+    assert batches[-1].more_pending is False
+    assert sum(costs) == 15
+    assert all(size <= 8 for size in recorded_reads)
+
+
 def test_lt_10_size_shrink_is_truncated_and_clears_partial(tmp_path, recorded_reads):
     path = tmp_path / "svc.log"
     path.write_bytes(b"keep\npartial")
