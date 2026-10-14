@@ -23,7 +23,7 @@ a service's output live in the same place they restart and configure it.
 3. No new subprocesses: log data is read directly from the path the supervisor
    already reports, with a deterministic fallback path.
 4. Bounded cost: opening a tab never reads a whole log file, an idle/hidden tab
-   never polls, and the in-view text is capped.
+   never polls, and every single poll has a hard byte budget.
 
 ### Non-Goals (explicitly out of scope)
 
@@ -52,8 +52,9 @@ Logs page (page 1), same window chrome:
 
 ```text
 ┌────────────────────────────────────────────────────────────────────┐
-│ ● Live   [⏸ Pause]  [☑ Follow]  [Open log file] [Copy] [Clear]      │
-│ 2026-10-14 11:56:12 INFO  grammar check ok                   1 204  │
+│ ● Live      [⏸ Pause]  [☑ Follow]  [Open log file] [Copy] [Clear]   │
+│ service running · 1 204 lines                                       │
+│ 2026-10-14 11:56:12 INFO  grammar check ok                          │
 │ 2026-10-14 11:57:02 ERROR upstream timeout                          │
 │ 2026-10-14 11:57:03 INFO  retrying once                             │
 └────────────────────────────────────────────────────────────────────┘
@@ -62,6 +63,30 @@ Logs page (page 1), same window chrome:
 The user selected this option over window-level tabs (duplicate navigation state,
 must reconcile with unsaved drafts) and a docked bottom panel (permanently halves
 the configuration area).
+
+**Two independent state displays (resolves review finding 5).** The header
+`StatusBadge` keeps showing service run state exactly as today. Inside the log
+page, the left chip reports **file health only** and the muted line below reports
+**service state only**:
+
+| Chip (file health) | Meaning |
+| --- | --- |
+| `● Live` | file readable and being consumed |
+| `⏸ Paused` | consumption paused by the user; file still readable |
+| `⚠ Log file not found` | path resolved but the file does not exist |
+| `⚠ Log unreadable: <reason>` | e.g. permission denied |
+| `◌ No log path` | no path resolved yet and the fallback is unavailable |
+
+| Muted line (service state) | Meaning |
+| --- | --- |
+| `service running` | `ServiceRunState.RUNNING` |
+| `service stopped` | `ServiceRunState.STOPPED` |
+| `service restarting` | `ServiceRunState.TRANSITIONING` |
+| `service unknown` | `ServiceRunState.UNKNOWN` (incl. supervisor inactive) |
+
+Precedence is structural, not a priority list: file health owns the chip, service
+state owns the muted line, so a supervisor status update can never erase a
+missing-file warning and vice versa.
 
 ## 3. Architecture & Components
 
@@ -73,44 +98,79 @@ the reader depends on nothing but the standard library.
 Incremental, rotation-tolerant reader for one append-only log file.
 
 ```python
+class LogFileStatus(str, Enum):
+    UNSET = "unset"        # no path configured
+    OK = "ok"
+    MISSING = "missing"    # path configured, file does not exist
+    UNREADABLE = "unreadable"  # exists but stat/open/read failed
+
 @dataclass(frozen=True)
 class LogReadBatch:
-    lines: List[str]              # complete lines, newline-stripped, in order
-    reset: Optional[str] = None   # None | "created" | "truncated" | "rotated" | "missing"
+    lines: List[str]                    # complete lines, newline-stripped, in order
+    status: LogFileStatus = LogFileStatus.OK
+    reset: Optional[str] = None         # None | "created" | "truncated" | "rotated"
+    error: Optional[str] = None         # human-readable reason when status != OK
+    more_pending: bool = False          # budget exhausted; call again to continue
 
 
 class LogTailReader:
-    def __init__(self, *, initial_bytes: int = 65_536, max_line_bytes: int = 16_384) -> None: ...
+    def __init__(self, *, initial_bytes: int = 65_536,
+                 max_batch_bytes: int = 262_144,
+                 max_line_bytes: int = 16_384) -> None: ...
 
     @property
     def path(self) -> Optional[Path]: ...
 
     def set_path(self, path: Optional[Union[str, Path]]) -> bool:
         """Point the reader at a log file; True when the target actually changed.
-        Changing the target resets offset, device/inode identity and any partial line."""
+        Accepts str or Path (normalized with os.fspath). Changing the target resets
+        offset, device/inode identity, partial line and error state."""
 
     def read_new_lines(self) -> LogReadBatch:
-        """Return everything appended since the previous call."""
+        """Return up to max_batch_bytes of newly appended content."""
 ```
+
+Every call reports `status` for the current poll, so the view never has to guess
+whether a missing file is new, persistent, or recovered. `reset` is only ever set
+when `status is OK`.
 
 Contract:
 
 | Situation | Behaviour |
 | --- | --- |
-| `path is None` | `LogReadBatch([], None)` |
-| First successful read of a target | seek to `max(0, size - initial_bytes)`; when starting mid-file, drop the first partial line; `reset="created"` |
-| `size` unchanged since last read | `LogReadBatch([], None)` — the common case, one `stat` only |
-| `size < offset` (truncated in place) | offset := 0, re-read from start, `reset="truncated"` |
-| `st_ino`/`st_dev` changed (rotated) | offset := 0, re-read from 0, `reset="rotated"` |
-| File missing, previously present | `reset="missing"` once, then `([], None)` until it returns |
-| File (re)appears | normal initial read, `reset="created"` |
-| No trailing `\n` | bytes after the last `\n` are buffered as a partial line; emitted only once a `\n` arrives |
-| Bytes > `max_line_bytes` with no `\n` | emit the decoded prefix plus `" …[line truncated]"`, then discard bytes until the next `\n` |
-| Undecodable bytes | decoded per line with `errors="replace"`; never raises |
+| `path is None` | `LogReadBatch([], LogFileStatus.UNSET)` |
+| Path configured, file absent | `LogReadBatch([], MISSING, error=<path>)`; repeats on every poll until it appears |
+| File exists, open/read fails | `LogReadBatch([], UNREADABLE, error=<oserror reason>)` |
+| First successful read of a target | seek to `max(0, size - initial_bytes)`; when starting mid-file, drop the first partial line; `status=OK, reset="created"` |
+| `size == offset` and `mtime_ns` unchanged | `([], OK)` — the common case, one `stat` only |
+| `size == offset` but `mtime_ns` changed | Rewritten in place at equal size: reset to 0 via the initial-read rule, `reset="truncated"` |
+| `size < offset` | Truncated: reset to `max(0, size - initial_bytes)` via the initial-read rule, `reset="truncated"` |
+| `st_ino`/`st_dev` changed (rotated) | Same as truncation but `reset="rotated"` |
+| File missing, previously OK | `MISSING` (with `error`) for the first time and on every subsequent poll while absent |
+| File (re)appears | Normal initial read, `reset="created"` |
+| No trailing `\n` | Bytes after the last `\n` are buffered as a partial line; emitted only once a `\n` arrives |
+| Bytes > `max_line_bytes` with no `\n` | Emit the decoded prefix plus `" …[line truncated]"`, then discard bytes until the next `\n` |
+| Bytes > `max_batch_bytes` available | `lines` filled up to the budget, `more_pending=True`; the caller drains with further calls |
+| Undecodable bytes | Decoded per line with `errors="replace"`; never raises |
 
-The reader holds no Qt imports and no line cap; bounding is the view's job
-(`QPlainTextEdit.setMaximumBlockCount`). Line cap in the reader would double-count
-and make `reset` semantics ambiguous.
+**Bounding (resolves review finding 4).** Every code path — initial read,
+rotation reset, truncation reset, and a large backlog accumulated while paused —
+uses the same two bounds: at most `max_batch_bytes` bytes are read per call, and a
+reset never re-reads more than the trailing `initial_bytes`. There is no path that
+reads a whole log file. `more_pending` lets the view drain without a single huge
+batch.
+
+**Stated, bounded limitation.** A truncate-and-regrow that completes inside one
+poll interval and ends past the previous offset is indistinguishable from an append
+without content comparison. It is detected when either the size shrinks below the
+offset or `mtime_ns` changes at equal size (the `copytruncate` cases this design
+targets). The residual case may surface a duplicated suffix of at most one poll
+interval of output; it can never crash, mis-state file health, or corrupt state.
+This limitation is documented rather than engineered around (YAGNI), and it is
+covered by an explicit test asserting the two detected cases.
+
+The reader holds no Qt imports and no line cap; bounding the *view* is
+`QPlainTextEdit.setMaximumBlockCount`.
 
 ### 3.2 `LogViewWidget` — `src/ai_manager/ui/widgets/log_view.py` (new)
 
@@ -118,17 +178,18 @@ and make `reset` semantics ambiguous.
 class LogViewWidget(QWidget):
     LOG_POLL_INTERVAL_MS = 1000
     MAX_LINES = 5000
+    MAX_READS_PER_TICK = 4          # ≤ 1 MiB consumed per tick
 
     def __init__(self, service_id: str, parent: Optional[QWidget] = None) -> None: ...
 
-    def set_log_path(self, path: Optional[str]) -> None        # forwards to reader; NO reset of view
-    def set_service_state(self, state: ServiceRunState) -> None  # status chip only
+    def set_log_path(self, path: Optional[Union[str, Path]]) -> None
+    def set_service_state(self, state: ServiceRunState) -> None
     def set_paused(self, paused: bool) -> None
     def set_follow(self, follow: bool) -> None
-    def clear_view(self) -> None        # clears text only; read offset untouched
-    def poll_once(self) -> None         # public seam used by tests and the QTimer
+    def clear_view(self) -> None    # clears text only; read offset untouched
+    def poll_once(self) -> None     # public seam used by tests and the QTimer
     @property
-    def is_polling(self) -> bool        # True while the QTimer is active
+    def is_polling(self) -> bool    # True while the QTimer is active
 ```
 
 Contents and behaviour:
@@ -136,24 +197,41 @@ Contents and behaviour:
 - `QPlainTextEdit` (object name `logView`), read-only, no wrap,
   `setMaximumBlockCount(MAX_LINES)`, fixed-width font from
   `QFontDatabase.systemFont(FixedFont)` so tests are font-independent.
-- Toolbar row: status chip (`● Live`, `○ Stopped`, `◌ Unknown`, `⚠ Log file not found`),
-  `⏸ Pause` / `▶ Resume` toggle, `☑ Follow` checkbox (checked), `Open log file`,
-  `Copy`, `Clear`, and a right-aligned counter (`"1 204 lines"`, `"5 000 lines (capped)"`).
-- `poll_once()` appends the batch from `LogTailReader`; `reset` values render one
-  plain-text marker line (`------ log rotated ------`, `------ log truncated ------`,
-  `------ log file missing ------`, `------ log file created ------`). Content is
-  always appended as **plain text** — log output is untrusted and never parsed as HTML.
+- Toolbar row: file-health chip, `⏸ Pause` / `▶ Resume` toggle, `☑ Follow`
+  checkbox (checked), `Open log file`, `Copy`, `Clear`; second muted line with the
+  service state and the line counter (`"1 204 lines"`, `"5 000 lines (capped)"`).
+- `poll_once()` performs at most `MAX_READS_PER_TICK` reader calls, appending each
+  batch; `more_pending` is simply consumed on the next call within the same tick,
+  so a resumed backlog drains at ≤ 1 MiB per second and the UI thread never blocks
+  on a giant read.
+- `reset` values render one plain-text marker line (`------ log rotated ------`,
+  `------ log truncated ------`, `------ log file created ------`). Content is
+  always **plain text** — log output is untrusted and is never parsed as HTML.
+- **File-health rendering (resolves finding 1).** `poll_once()` compares the batch
+  `status`/`error` with the last rendered state. On a change it updates the chip and
+  renders exactly one placeholder line for `MISSING`, `UNREADABLE` or `UNSET`
+  (`Log file not found: <path>`, `Cannot read log file: <reason>`, `No log file
+  resolved yet`), replacing a previous placeholder rather than stacking a new one.
+  A return to `OK` removes the placeholder and renders the `created` marker. The
+  status is re-evaluated on every poll, so a service that starts writing later
+  recovers with no user action. Errors are therefore surfaced once per transition,
+  not once per poll.
+- **Path changes (resolves finding 6).** `set_log_path()` is deliberately
+  **history-preserving**: existing lines stay in the view, and the reader is reset to
+  the new target, so the next poll renders `------ log file changed: <path> ------`
+  followed by the new file's tail. History is never silently wiped on a status
+  refresh (which may legitimately re-report the fallback path), and the marker keeps
+  the concatenation truthful. `clear_view()` remains the explicit way to wipe text.
 - Follow semantics: auto-scroll happens only when Follow is checked; unchecking
   Follow lets the user scroll freely without being yanked to the bottom.
 - Pause semantics: Pause stops consuming bytes (the timer keeps running and the
-  offset is untouched), so resuming shows exactly the output produced while paused.
+  offset is untouched), so resuming shows exactly the output produced while paused,
+  drained under the per-tick budget.
 - Timer lifecycle: started in `showEvent`, stopped in `hideEvent`. Inside a
-  `QTabWidget` this means only the visible tab polls; the default tab
-  (`Configuration`) never reads a log file at all.
-- Missing/unreadable file: the reader reports it; the view shows the placeholder
-  text and switches the chip to `⚠ Log file not found` (path is quoted in the
-  placeholder). Errors are surfaced once per state change, not per poll.
-- `Open log file` uses `QDesktopServices.openUrl(QUrl.fromLocalFile(...))`;
+  `QTabWidget` this means only the visible tab polls; the default `Configuration`
+  tab never reads a log file at all.
+- `Open log file` uses `QDesktopServices.openUrl(QUrl.fromLocalFile(...))`; when
+  that returns `False` the chip tooltip carries the raw path instead of failing.
   `Copy` copies the selection, or all text when nothing is selected.
 
 ### 3.3 Tab integration — `src/ai_manager/ui/app_detail_view.py` (modified)
@@ -163,31 +241,39 @@ Contents and behaviour:
 - New `QTabWidget` sits below the header frame and fills the rest of the view;
   the footer's Save buttons live inside the Configuration page because they act on
   the config draft, not on logs.
-- `update_service_status(status)` keeps updating the `StatusBadge` and additionally
-  forwards `status.log_path or default_log_path(app_id)` and `status.state` to the
-  log view.
-- Public addition for the window layer and tests: a `log_view` property exposing
-  the page's `LogViewWidget`.
-- Tab change is inert with respect to config state: `config_changed` is never
+- New `log_view` property exposing the page's widget for the window layer and tests.
+- **Path resolution with memory (resolves finding 3).** `AppDetailView` holds
+  `_known_log_path: Optional[str]`. In `update_service_status(status)`:
+  1. if `status.log_path` is non-empty, set `_known_log_path = status.log_path`;
+  2. pass `_known_log_path if _known_log_path else str(default_log_path(app_id))`
+     to `log_view.set_log_path(...)`;
+  3. pass `status.state` to `log_view.set_service_state(...)`;
+  4. keep updating the header `StatusBadge` exactly as today.
+  A later status without `log_path` therefore **cannot** downgrade an explicit path
+  to the fallback; the fallback is used only before any path has ever been reported.
+- Tab switching is inert with respect to config state: `config_changed` is never
   emitted by tab switching, so dirty/asterisk behaviour in the sidebar is unchanged.
 
 ### 3.4 Fallback path — `src/ai_manager/services/supervisor.py` (modified)
 
 ```python
 def default_log_path(service_id: str) -> Path:
-    """~/.cache/ai-backends/logs/<service_id>.log — used only when supervisor status omits log_path."""
+    """~/.cache/ai-backends/logs/<service_id>.log — used only when no log_path was ever reported."""
 ```
 
-Used when `log_path` is absent (supervisor stopped, or service not yet reported).
+`SERVICE_LINE_RE` already requires `log=<path>`, so a hypothetical row without a
+log column does not match and the service is simply absent from
+`status.services`; the absent-service path below supplies the fallback and this
+design leaves the existing regex untouched (resolves finding 2).
 
 ### 3.5 Main window — `src/ai_manager/ui/main_window.py` (modified)
 
-No structural change: `_on_supervisor_status` already calls
-`view.update_service_status(s_stat)` for every reported service. One addition —
-services absent from the status payload (supervisor stopped) are forwarded as
-`ServiceRunState.UNKNOWN`, which the existing `StatusBadge` already renders as
-`Unknown`, so a stopped supervisor cannot leave a stale `Running` badge in either
-the header or the log chip.
+`_on_supervisor_status` keeps its current shape for reported services and gains one
+loop: **every** managed app absent from `status.services` is forwarded a synthetic
+`ServiceStatus(service_id=app_id, state=ServiceRunState.UNKNOWN)` **to both the
+sidebar and the detail view** (resolves findings 2 and 7). `StatusBadge` already
+renders `UNKNOWN` as `Unknown`, so a stopped supervisor can no longer leave stale
+`Running` badges in the sidebar, the header, or the log tab's service line.
 
 ### 3.6 Theme — `src/ai_manager/ui/theme.py` (modified)
 
@@ -198,9 +284,8 @@ Add to both `DARK_QSS` and `LIGHT_QSS`:
   `#93c5fd` accent on dark / `#2563eb` on light, consistent with the toolbar),
 - `QPlainTextEdit#logView` (dark `#121217` on `#d4d4d8`; light `#ffffff` on `#1e293b`,
   monospace family, matching selection colors),
-- `QLabel#logStatusChip` and `QLabel#logLineCounter` muted-text styles.
-
-No other widget styles change, so existing screenshots and tests stay valid.
+- `QLabel#logStatusChip`, `QLabel#logServiceState` and `QLabel#logLineCounter`
+  muted-text styles.
 
 ## 4. Data Flow
 
@@ -208,34 +293,38 @@ No other widget styles change, so existing screenshots and tests stay valid.
 QTimer (1000 ms, only while Logs tab visible)
         │
         ▼
-LogViewWidget.poll_once()
-        │
-        ▼
-LogTailReader.read_new_lines()  ──stat──►  ~/.cache/ai-backends/logs/<id>.log
-        │  LogReadBatch(lines, reset)
+LogViewWidget.poll_once()   ── up to 4 × read_new_lines() per tick ──┐
+        │                                                            │
+        │                          LogTailReader  ──stat/seek/read──► │  <log file>
+        │  LogReadBatch(lines, status, reset, error, more_pending) ◄──┘
         ▼
 QPlainTextEdit.appendPlainText(line)          (cap 5 000 blocks)
         │
+        ├─ status change → chip + single placeholder line
+        ├─ reset → one plain-text marker line
         └─ if follow: move cursor to end
 
 SupervisorManager.refresh_status() ──poll_interval_ms (4 s, unchanged)──►
-  MainWindow._on_supervisor_status → AppDetailView.update_service_status
-    → StatusBadge (unchanged) + LogViewWidget.set_service_state/set_log_path
+  MainWindow._on_supervisor_status → for every managed app:
+    sidebar.update_status         (reported status, else synthetic UNKNOWN)
+    AppDetailView.update_service_status
+      → StatusBadge (unchanged) + LogViewWidget.set_service_state/set_log_path
 ```
 
 The two timers are intentionally independent: status polling stays at the user's
-`poll_interval_ms`, while log reading is a cheap local `stat` plus an incremental
-read at 1 s.
+`poll_interval_ms`, while log reading is a cheap local `stat` plus a bounded
+incremental read at 1 s.
 
 ## 5. Error Handling
 
 | Failure | User-visible behaviour |
 | --- | --- |
-| Log path unknown and fallback file missing | Placeholder `Log file not found: <path>` + chip `⚠ Log file not found`; retried on the next poll, so starting the service recovers automatically |
-| Permission denied | Same placeholder with `Permission denied` as the reason; chip warning |
-| Supervisor stopped | Chip `◌ Unknown`; last known path is still tailed if the file exists, since post-mortem output matters most |
-| Rotation / truncation | Marker line in the view, reader restarts from byte 0, no crash, no duplicated tail |
-| Gigantic file | Initial read bounded by `initial_bytes` (64 KiB) |
+| Log path unknown and fallback file missing | Chip `⚠ Log file not found`, one placeholder line naming the path; re-checked every poll, so creating the file recovers automatically |
+| Permission denied / read error | Chip `⚠ Log unreadable: <reason>`, one placeholder line; repeated attempts do not spam the view |
+| Supervisor stopped | Muted line `service unknown`; the last known path is **retained** (never downgraded to the fallback) and still tailed if the file exists, because post-mortem output matters most |
+| Rotation / truncation / equal-size rewrite | Marker line in the view, reader restarts under the `initial_bytes` bound, no crash, no unbounded read |
+| Gigantic file | Initial and reset reads bounded by 64 KiB; each poll bounded by 256 KiB |
+| Backlog while paused | Drained at ≤ 1 MiB/s across ticks (`MAX_READS_PER_TICK`) |
 | Line longer than 16 KiB | Emitted truncated with `…[line truncated]`, remaining bytes skipped to the next newline |
 | Non-UTF-8 output | Replaced characters, never an exception |
 
@@ -244,30 +333,42 @@ read at 1 s.
 All tests run headless (`QT_QPA_PLATFORM=offscreen`, existing `conftest.py`) and
 never invoke `ai-backends`; log files are created under `tmp_path`.
 
-- **`tests/test_log_tailer.py` (new, pure unit).** Missing path → empty batch;
-  `set_path` change detection; initial read of only the last `initial_bytes` with
-  the first partial line dropped; append → only new lines; unchanged size → empty
-  batch; in-place truncation → `reset="truncated"` and full re-read; inode change
-  (replace file) → `reset="rotated"`; partial trailing line held until `\n`; over-long
-  line truncated once and remainder skipped; invalid UTF-8 replaced without raising;
-  missing → reappearing file emits `reset="created"`.
+- **`tests/test_log_tailer.py` (new, pure unit).** `UNSET` for no path; `MISSING`
+  with an error reason for an absent file and `reset="created"` when it appears;
+  `UNREADABLE` for a chmod-000 file (skipped when running as root); `set_path`
+  change detection and str/`Path` acceptance; initial read of only the last
+  `initial_bytes` with the first partial line dropped; append → only new lines;
+  unchanged size+mtime → empty batch; in-place truncation → `reset="truncated"`
+  with a bounded re-read; equal-size rewrite (new content, same length, newer
+  mtime) → `reset="truncated"`; inode change → `reset="rotated"`; partial trailing
+  line held until `\n`; over-long line truncated once and remainder skipped;
+  invalid UTF-8 replaced without raising; a > `max_batch_bytes` append returns
+  `more_pending=True` and drains across repeated calls without loss or duplication.
 - **`tests/test_log_view.py` (new, Qt offscreen).** `poll_once` renders appended
   lines; `MAX_LINES` cap enforced through `maximumBlockCount`; Pause stops
   consumption and Resume delivers the backlog; Follow toggling changes auto-scroll
   without losing lines; `clear_view` empties the view and the next poll does not
-  resurrect old output; marker lines rendered for rotation; missing-file
-  placeholder and chip text; `set_log_path` toggles between two files without
-  cross-contamination; timer is not active while hidden and is active after
-  `show()`.
+  resurrect old output; marker lines for rotation; file-health chip transitions
+  (`OK`→`MISSING`→`OK`) render exactly one placeholder at a time; path switch keeps
+  history and adds the `log file changed` marker without mixing the two files'
+  offset state; service-state line and chip evolve independently (a status update
+  cannot clear a missing-file warning).
 - **`tests/test_app_views.py` (extended).** Each `AppDetailView` exposes exactly the
-  `Configuration` and `Logs` tabs, `Configuration` is the default page, and
-  toggling the split-model checkbox on the config page still yields the same draft
-  (dirty state unaffected by the new tab).
+  `Configuration` and `Logs` tabs with `Configuration` default; toggling the
+  split-model checkbox still yields the same draft (dirty state unaffected);
+  `update_service_status` remembers an explicit `log_path` and does not replace it
+  with the fallback on a later status lacking one.
 - **`tests/test_main_window.py` (extended).** A supervisor status routed through
-  `_on_supervisor_status` reaches the per-app log view (`log_view` path + chip),
-  and a status payload without the app marks it `Unknown` rather than stale-running.
-- **`tests/test_widgets.py` (extended).** Theme test asserts tab and `logView` QSS
-  exist in both `DARK_QSS` and `LIGHT_QSS`.
+  `_on_supervisor_status` reaches the per-app log view; a status payload that omits
+  an app sends synthetic `UNKNOWN` to **both** the sidebar and the detail view
+  (stale `Running` is cleared).
+- **Visibility (resolves finding 8).** Polling gating is tested in a real
+  hierarchy, not a bare `show()`/`hide()`: build a `QTabWidget` whose second page is
+  the log view, assert `is_polling` is `False` on the Configuration page and `True`
+  after `setCurrentIndex(1)`, then `False` again after switching back; repeat for a
+  `QStackedWidget` standing in for `MainWindow.stack`.
+- **`tests/test_widgets.py` (extended).** Theme test asserts tab, pane, `logView`,
+  and log-status-label QSS exist in both `DARK_QSS` and `LIGHT_QSS`.
 
 ## 7. Compatibility & Risks
 
@@ -275,13 +376,32 @@ never invoke `ai-backends`; log files are created under `tmp_path`.
   config-file changes; the feature is read-only with respect to every external file.
 - **Log format is opaque.** Nothing parses log lines, so format changes in the
   backends cannot break the view.
+- **Layout change is acknowledged (resolves finding 9).** The detail view gains a
+  tab bar and the footer moves inside the Configuration page, so *rendered*
+  screenshots of the detail view change; what stays valid is the QSS contract — the
+  new rules are additive and the existing style assertions in `tests/test_widgets.py`
+  are unaffected. `docs/superpowers/specs/mockups/` screenshots that show the old
+  detail view are historical and are not regenerated by this work.
 - **Risk: 1 s polling cost.** Mitigated by `stat`-first reads, `showEvent`/`hideEvent`
-  gating, and the 64 KiB initial bound. A hidden tab performs zero syscalls.
-- **Risk: unbounded memory.** Bounded by `setMaximumBlockCount(5 000)` at roughly
-  ≤ 5 000 × 16 KiB in the pathological case, and by the 16 KiB line cap in practice.
-- **Risk: `QDesktopServices` unavailable in headless CI.** The handler is a no-op
-  guard: if `openUrl` returns `False`, the view shows a tooltip with the raw path
-  instead of failing.
-- **Reversibility:** the feature adds one widget, one reader, one tab page and QSS;
-  removing the tab requires deleting the two new files and reverting three small
-  hunks.
+  gating, and the 256 KiB per-poll bound. A hidden tab performs zero syscalls.
+- **Risk: unbounded memory.** Bounded by `setMaximumBlockCount(5 000)` and the
+  16 KiB per-line cap; the pathological upper bound is ≤ 5 000 × 16 KiB.
+- **Risk: `QDesktopServices` unavailable in headless CI.** Guarded by the
+  `openUrl` return value; the tooltip carries the path instead.
+- **Reversibility:** the feature adds one reader, one widget, one tab page and
+  additive QSS; removing it means deleting the two new files and reverting three
+  small hunks.
+
+## 8. Design Review Resolutions
+
+| # | Finding (attempt 2) | Resolution |
+| --- | --- | --- |
+| 1 | Blocker: `LogReadBatch` cannot report missing/unreadable/error reasons | Added `LogFileStatus`, `status`, `error`, `more_pending`; §3.1 contract table + §3.2 single-placeholder transition rule + §5 |
+| 2 | Major: UNKNOWN forwarding, mandatory `log=` column, `Path` vs `str` | §3.5 forwards synthetic UNKNOWN to all managed apps incl. sidebar; §3.4 documents the untouched regex path; `set_path`/`set_log_path` accept `Union[str, Path]` |
+| 3 | Major: fallback replaced a known custom path | §3.3 `_known_log_path` memory; fallback only before any path was reported |
+| 4 | Major: unbounded reset/backlog/paused reads; copytruncate | §3.1 `max_batch_bytes` on every path, bounded resets, equal-size mtime detection, explicit bounded limitation; §3.2 `MAX_READS_PER_TICK` |
+| 5 | Major: chip conflated file health and service state | §2 two separate displays with structural precedence; chip/state tables |
+| 6 | Major: `set_log_path` vs "no cross-contamination" test | §3.2 history-preserving with `log file changed` marker; test reworded in §6 |
+| 7 | Minor: sidebar stale Running for absent services | §3.5 synthetic UNKNOWN to both sidebar and detail view; §6 test |
+| 8 | Minor: show/hide test does not prove tab gating | §6 real `QTabWidget`/`QStackedWidget` visibility test |
+| 9 | Minor: screenshot compatibility claim | §7 narrowed to the QSS contract; layout change acknowledged |
