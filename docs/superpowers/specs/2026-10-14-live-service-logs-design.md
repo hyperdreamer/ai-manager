@@ -181,14 +181,16 @@ tests can wrap the handle and record every `read(n)` call; byte bounds are asser
 against those records instead of being inferred from returned lines (resolves
 review finding 13).
 
-**Stated, bounded limitation.** A truncate-and-regrow that completes inside one
-poll interval and ends past the previous offset is indistinguishable from an append
-without content comparison. It is detected when either the size shrinks below the
-offset or `mtime_ns` changes at equal size (the `copytruncate` cases this design
-targets). The residual case may surface a duplicated suffix of at most one poll
-interval of output; it can never crash, mis-state file health, or corrupt state.
-This limitation is documented rather than engineered around (YAGNI), and it is
-covered by an explicit test asserting the two detected cases.
+**Stated limitation (no quantitative bound).** A truncate-and-regrow that completes
+inside one poll interval and ends past the previous offset is indistinguishable from
+an append without content comparison. It is detected when either the size shrinks
+below the offset or `mtime_ns` changes at equal size (the `copytruncate` cases this
+design targets). The reader has no clock and performs no content comparison, so the
+undetected case may duplicate a suffix of the rewritten content of unspecified
+length; the requirement is only that it can never crash, corrupt reader state, or
+mis-state file health. This limitation is documented rather than engineered around
+(YAGNI), and the detected cases are covered by explicit tests. The specification's
+R20 is the normative wording.
 
 The reader holds no Qt imports and no line cap; bounding the *view* is
 `QPlainTextEdit.setMaximumBlockCount`.
@@ -377,7 +379,7 @@ incremental read at 1 s.
 | Rotation / truncation / equal-size rewrite | Marker line in the view, reader restarts under the `initial_bytes` bound, no crash, no unbounded read |
 | Gigantic file | Initial and reset reads bounded by 64 KiB; each poll bounded by 256 KiB |
 | Backlog while paused | Drained at ≤ 1 MiB/s across ticks (`MAX_READS_PER_TICK`) |
-| Line longer than 16 KiB | Emitted truncated with `…[line truncated]`, remaining bytes skipped to the next newline |
+| Line longer than 16 KiB | Emitted truncated with ` …[line truncated]`, remaining bytes skipped to the next newline |
 | Non-UTF-8 output | Replaced characters, never an exception |
 
 ## 6. Test Strategy
@@ -465,7 +467,7 @@ never invoke `ai-backends`; log files are created under `tmp_path`.
 | 1 | Blocker: `LogReadBatch` cannot report missing/unreadable/error reasons | Added `LogFileStatus`, `status`, `error`, `more_pending`; §3.1 contract table + §3.2 single-placeholder transition rule + §5 |
 | 2 | Major: UNKNOWN forwarding, mandatory `log=` column, `Path` vs `str` | §3.5 forwards synthetic UNKNOWN to all managed apps incl. sidebar; §3.4 documents the untouched regex path; `set_path`/`set_log_path` accept `Union[str, Path]` |
 | 3 | Major: fallback replaced a known custom path | §3.3 `_known_log_path` memory; fallback only before any path was reported |
-| 4 | Major: unbounded reset/backlog/paused reads; copytruncate | §3.1 `max_batch_bytes` on every path, bounded resets, equal-size mtime detection, explicit bounded limitation; §3.2 `MAX_READS_PER_TICK` |
+| 4 | Major: unbounded reset/backlog/paused reads; copytruncate | §3.1 `max_batch_bytes` on every path, bounded resets, equal-size mtime detection, explicit limitation without a time bound; §3.2 `MAX_READS_PER_TICK` |
 | 5 | Major: chip conflated file health and service state | §2 two separate displays with structural precedence; chip/state tables |
 | 6 | Major: `set_log_path` vs "no cross-contamination" test | §3.2 history-preserving with `log file changed` marker; test reworded in §6 |
 | 7 | Minor: sidebar stale Running for absent services | §3.5 synthetic UNKNOWN to both sidebar and detail view; §6 test |
