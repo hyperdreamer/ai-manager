@@ -1,7 +1,42 @@
 import shutil
 from pathlib import Path
-from ai_manager.config.models import ThemeMode
+from unittest.mock import MagicMock
+
+from ai_manager.config.models import (
+    ServiceRunState,
+    ServiceStatus,
+    SupervisorStatus,
+    ThemeMode,
+)
 from ai_manager.ui.main_window import MainWindow
+
+
+def make_test_window(qtbot, tmp_path):
+    """Build a MainWindow against copied fixtures with mocked status sinks."""
+    fixtures_dir = Path(__file__).parent / "fixtures"
+    for d in ["ai-grammar", "textkit", "yt2txt"]:
+        (tmp_path / d / "backend").mkdir(parents=True)
+
+    shutil.copy2(
+        fixtures_dir / "ai_grammar_config.yaml",
+        tmp_path / "ai-grammar" / "backend" / "config.yaml",
+    )
+    shutil.copy2(
+        fixtures_dir / "textkit_unified_config.yaml",
+        tmp_path / "textkit" / "backend" / "config.yaml",
+    )
+    shutil.copy2(
+        fixtures_dir / "yt2txt_config.yaml",
+        tmp_path / "yt2txt" / "backend" / "config.yaml",
+    )
+
+    window = MainWindow(workspace_root=tmp_path)
+    qtbot.addWidget(window)
+
+    window.sidebar.update_status = MagicMock()
+    for view in window.views.values():
+        view.update_service_status = MagicMock()
+    return window
 
 
 def test_main_window_init_and_navigation(qtbot, tmp_path):
@@ -35,3 +70,47 @@ def test_main_window_init_and_navigation(qtbot, tmp_path):
     prev_theme = window.settings.theme
     window._toggle_theme()
     assert window.settings.theme != prev_theme
+
+
+def test_status_normalization_forwards_reported_and_missing_apps(qtbot, tmp_path):
+    window = make_test_window(qtbot, tmp_path)
+    reported = ServiceStatus(
+        service_id="ai-grammar", state=ServiceRunState.RUNNING,
+        pid=123, log_path="/tmp/grammar.log",
+    )
+    window._on_supervisor_status(
+        SupervisorStatus(is_running=True, supervisor_pid=9,
+                         services={"ai-grammar": reported})
+    )
+    assert window.sidebar.update_status.call_count == len(window.apps)
+    for app_id in window.apps:
+        forwarded = window.sidebar.update_status.call_args_list[
+            list(window.apps).index(app_id)
+        ].args[1]
+        assert forwarded.service_id == app_id
+        if app_id == "ai-grammar":
+            assert forwarded is reported
+        else:
+            assert forwarded.state == ServiceRunState.UNKNOWN
+            assert forwarded.log_path is None
+            assert window.views[app_id].update_service_status.call_args.args[0] is forwarded
+
+
+def test_inactive_supervisor_sends_unknown_to_every_managed_app(qtbot, tmp_path):
+    window = make_test_window(qtbot, tmp_path)
+    residual = ServiceStatus(
+        service_id="ai-grammar", state=ServiceRunState.STOPPED,
+        pid=None, log_path="/tmp/grammar.log",
+    )
+    window._on_supervisor_status(
+        SupervisorStatus(is_running=False, services={"ai-grammar": residual})
+    )
+    for app_id in window.apps:
+        forwarded = next(
+            call.args[1] for call in window.sidebar.update_status.call_args_list
+            if call.args[0] == app_id
+        )
+        assert forwarded == ServiceStatus(
+            service_id=app_id, state=ServiceRunState.UNKNOWN
+        )
+        assert window.views[app_id].update_service_status.call_args.args[0] == forwarded

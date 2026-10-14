@@ -272,11 +272,17 @@ class MainWindow(QMainWindow):
             self._supervisor_action_btn.setText("Start Supervisor")
 
         # Update per-app views & sidebar
-        for app_id, s_stat in status.services.items():
-            if app_id in self.apps:
-                self.sidebar.update_status(app_id, s_stat)
-                if app_id in self.views:
-                    self.views[app_id].update_service_status(s_stat)
+        for app_id in self.apps:
+            reported = status.services.get(app_id)
+            if status.is_running and reported is not None:
+                normalized_status = reported
+            else:
+                normalized_status = ServiceStatus(
+                    service_id=app_id, state=ServiceRunState.UNKNOWN
+                )
+            self.sidebar.update_status(app_id, normalized_status)
+            if app_id in self.views:
+                self.views[app_id].update_service_status(normalized_status)
 
     def _on_supervisor_btn_clicked(self) -> None:
         if self._supervisor_action_btn.text() == "Start Supervisor":
