@@ -86,7 +86,9 @@ page, the left chip reports **file health only** and the muted line below report
 
 Precedence is structural, not a priority list: file health owns the chip, service
 state owns the muted line, so a supervisor status update can never erase a
-missing-file warning and vice versa.
+missing-file warning and vice versa. `● Live` and `⏸ Paused` assert *successful
+consumption*: a stat-only check can never promote the chip to `● Live` by itself,
+and a probe cannot clear an error that a read actually discovered (finding 14).
 
 ## 3. Architecture & Components
 
@@ -103,6 +105,12 @@ class LogFileStatus(str, Enum):
     OK = "ok"
     MISSING = "missing"    # path configured, file does not exist
     UNREADABLE = "unreadable"  # exists but stat/open/read failed
+
+class FilePresence(str, Enum):
+    UNSET = "unset"            # no path configured
+    MISSING = "missing"        # stat says ENOENT/ENOTDIR
+    PRESENT = "present"        # stat succeeded; readability NOT asserted
+    UNAVAILABLE = "unavailable"  # stat failed for another reason (e.g. EACCES on a parent)
 
 @dataclass(frozen=True)
 class LogReadBatch:
@@ -126,9 +134,9 @@ class LogTailReader:
         Accepts str or Path (normalized with os.fspath). Changing the target resets
         offset, device/inode identity, partial line and error state."""
 
-    def probe_status(self) -> Tuple[LogFileStatus, Optional[str]]:
-        """stat-only health check used while paused. Never reads, never advances
-        the offset, never mutates state."""
+    def probe_health(self) -> Tuple[FilePresence, Optional[str]]:
+        """stat-only presence check used while paused. Never reads, never advances
+        the offset, never mutates state, and never claims readability."""
 
     def read_new_lines(self) -> LogReadBatch:
         """Return up to max_batch_bytes of newly appended content."""
@@ -144,6 +152,9 @@ Contract:
 | --- | --- |
 | `path is None` | `LogReadBatch([], LogFileStatus.UNSET)` |
 | Path configured, file absent | `LogReadBatch([], MISSING, error=<path>)`; repeats on every poll until it appears |
+| Path configured, `probe_health()` says `MISSING` | metadata-only confirmation; readable by the view even while paused |
+| Path configured, `probe_health()` says `PRESENT` | presence only — **not** proof of readability, because `stat` succeeds on an unreadable file |
+| Path configured, `probe_health()` says `UNAVAILABLE` | e.g. a parent directory denies search; treat as unreadable metadata |
 | File exists, open/read fails | `LogReadBatch([], UNREADABLE, error=<oserror reason>)`; the offset is kept so a transient failure cannot duplicate output |
 | A previously `UNREADABLE`/`MISSING` file becomes readable again | `status=OK`; reading resumes from the retained offset, and `reset` stays `None` unless the file was genuinely new or reappeared |
 | First successful read of a target | seek to `max(0, size - initial_bytes)`; when starting mid-file, drop the first partial line; `status=OK, reset="created"` |
@@ -210,27 +221,43 @@ Contents and behaviour:
 - Toolbar row: file-health chip, `⏸ Pause` / `▶ Resume` toggle, `☑ Follow`
   checkbox (checked), `Open log file`, `Copy`, `Clear`; second muted line with the
   service state and the line counter (`"1 204 lines"`, `"5 000 lines (capped)"`).
-- `poll_once()` first calls `reader.probe_status()` on **every** tick, including
-  while paused, so the file-health chip is always current; then, unless paused, it
+- `poll_once()` first calls `reader.probe_health()` on **every** tick, including
+  while paused, so presence changes are always current; then, unless paused, it
   performs at most `MAX_READS_PER_TICK` reader calls, appending each batch.
   `more_pending` is consumed on the next call within the same tick, so a resumed
   backlog drains at ≤ 1 MiB per second and the UI thread never blocks on a giant
-  read. Pause therefore gates content only, never file health (resolves review
+  read. Pause therefore gates content only, never presence (resolves review
   finding 11).
 - `reset` values render one plain-text marker line (`------ log rotated ------`,
   `------ log truncated ------`, `------ log file created ------`). Content is
   always **plain text** — log output is untrusted and is never parsed as HTML.
-- **File-health rendering (resolves findings 1 and 12).** `poll_once()` compares the
-  probed `status`/`error` with the last rendered state. On a change it updates the
-  chip and renders exactly one placeholder line for `MISSING`, `UNREADABLE` or
-  `UNSET` (`Log file not found: <path>`, `Cannot read log file: <reason>`, `No log
-  file resolved yet`), replacing a previous placeholder rather than stacking a new
-  one. A return to `OK` always removes the placeholder; a `------ log file created
+- **File-health rendering (resolves findings 1, 12 and 14).** Read batches are the
+  **authoritative** source of readability, because only an actual open/read can
+  distinguish `OK` from `UNREADABLE`; `probe_health()` contributes presence only.
+  The chip is a pure function of (presence, paused, last read-observed status):
+
+  | Presence | Paused | Last read status | Chip |
+  | --- | --- | --- | --- |
+  | `UNSET` | any | – | `◌ No log path` |
+  | `MISSING` | any | – | `⚠ Log file not found` |
+  | `UNAVAILABLE` | any | – | `⚠ Log unreadable: <reason>` |
+  | `PRESENT` | yes | `UNREADABLE` | `⚠ Log unreadable: <reason>` (retained) |
+  | `PRESENT` | yes | anything else | `⏸ Paused` |
+  | `PRESENT` | no | batch `OK` | `● Live` |
+  | `PRESENT` | no | batch `UNREADABLE` | `⚠ Log unreadable: <reason>` |
+
+  A read-observed `UNREADABLE` clears only on a successful read of the same file
+  identity, or when the identity changes (a replaced file is a fresh subject), so a
+  paused `PRESENT` probe can never mask a real read error. On a chip change the view
+  renders exactly one placeholder line for `MISSING`, `UNREADABLE` or `UNSET`
+  (`Log file not found: <path>`, `Cannot read log file: <reason>`, `No log file
+  resolved yet`), replacing a previous placeholder rather than stacking a new one.
+  A return to `OK` always removes the placeholder; a `------ log file created
   ------` marker is rendered **only** when a batch carries `reset="created"`, so a
   transient error clearing without a file change resumes output from the retained
-  offset with no misleading marker. Because the probe runs on every tick, a service
-  that starts writing later recovers with no user action. Errors are surfaced once
-  per transition, not once per poll.
+  offset with no misleading marker. Because presence is probed on every tick, a
+  service that starts writing later recovers with no user action. Errors are
+  surfaced once per transition, not once per poll.
 - **Path changes (resolves finding 6).** `set_log_path()` is deliberately
   **history-preserving**: existing lines stay in the view, and the reader is reset to
   the new target, so the next poll renders `------ log file changed: <path> ------`
@@ -317,7 +344,7 @@ Add to both `DARK_QSS` and `LIGHT_QSS`:
 QTimer (1000 ms, only while Logs tab visible)
         │
         ▼
-LogViewWidget.poll_once()   ── probe_status() every tick (stat only) ──┐
+LogViewWidget.poll_once()   ── probe_health() every tick (presence only) ──┐
         │                   ── unless paused: up to 4 × read_new_lines() │
         │                          LogTailReader  ──stat/seek/read──►   │  <log file>
         │  LogReadBatch(lines, status, reset, error, more_pending) ◄────┘
@@ -346,7 +373,7 @@ incremental read at 1 s.
 | Log path unknown and fallback file missing | Chip `⚠ Log file not found`, one placeholder line naming the path; re-checked every poll, so creating the file recovers automatically |
 | Permission denied / read error | Chip `⚠ Log unreadable: <reason>`, one placeholder line; repeated attempts do not spam the view |
 | Supervisor stopped (`is_running=False`) | Every service's muted line reads `service unknown` regardless of residual reported rows; the last known path is **retained** (never downgraded to the fallback) and still tailed if the file exists, because post-mortem output matters most |
-| File health changes while paused | The stat-only probe keeps the chip truthful (e.g. `⚠ Log file not found` appears while paused); content stays frozen until Resume |
+| File health changes while paused | Presence is probed every tick, so `⚠ Log file not found` can appear while paused; a read-discovered `⚠ Log unreadable` is retained until a successful read, because `stat` cannot prove readability |
 | Rotation / truncation / equal-size rewrite | Marker line in the view, reader restarts under the `initial_bytes` bound, no crash, no unbounded read |
 | Gigantic file | Initial and reset reads bounded by 64 KiB; each poll bounded by 256 KiB |
 | Backlog while paused | Drained at ≤ 1 MiB/s across ticks (`MAX_READS_PER_TICK`) |
@@ -369,10 +396,10 @@ never invoke `ai-backends`; log files are created under `tmp_path`.
   line held until `\n`; over-long line truncated once and remainder skipped;
   invalid UTF-8 replaced without raising; a > `max_batch_bytes` append returns
   `more_pending=True` and drains across repeated calls without loss or duplication;
-  `probe_status()` never advances the offset (an append made while probing is still
-  delivered by the next read) and reports `MISSING`/`UNREADABLE` transitions; a
-  transient `UNREADABLE` that clears resumes from the retained offset with
-  `reset=None`.
+  `probe_health()` never advances the offset (an append made while probing is still
+  delivered by the next read) and reports `MISSING`/`PRESENT`/`UNAVAILABLE`
+  presence transitions without claiming readability; a transient `UNREADABLE` that
+  clears resumes from the retained offset with `reset=None`.
 - **`tests/test_log_view.py` (new, Qt offscreen).** `poll_once` renders appended
   lines; `MAX_LINES` cap enforced through `maximumBlockCount`; Pause stops
   consumption and Resume delivers the backlog; Follow toggling changes auto-scroll
@@ -380,7 +407,10 @@ never invoke `ai-backends`; log files are created under `tmp_path`.
   resurrect old output; marker lines for rotation; file-health chip transitions
   (`OK`→`MISSING`→`OK`) render exactly one placeholder at a time; while paused, a
   deleted file still flips the chip to `⚠ Log file not found` and Resume then
-  delivers the backlog; path switch keeps history and adds the `log file changed`
+  delivers the backlog; a chmod-000 file (skipped as root) sets
+  `⚠ Log unreadable`, is paused, is made readable again, and the chip stays
+  `⚠ Log unreadable` across paused ticks until a successful read clears it; path
+  switch keeps history and adds the `log file changed`
   marker without mixing the two files' offset state; service-state line and chip
   evolve independently (a status update cannot clear a missing-file warning).
 - **`tests/test_app_views.py` (extended).** Each `AppDetailView` exposes exactly the
@@ -445,3 +475,4 @@ never invoke `ai-backends`; log files are created under `tmp_path`.
 | 11 | Major (attempt 3): paused view cannot detect file-health changes | §3.1 `probe_status()` stat-only API; §3.2 probe runs every tick, pause gates content only; §6 tests |
 | 12 | Major (attempt 3): transient `UNREADABLE` clearing wrongly implied a `created` marker | §3.1 recovery keeps the offset with `reset=None`; §3.2 marker only on `reset="created"`; §6 test |
 | 13 | Major (attempt 3): tests could not prove the I/O bounds | §3.1 `_open_file` instrumentation seam; §6 test asserts per-call byte maxima and per-tick call counts |
+| 14 | Major (attempt 5): `stat`-only probe cannot prove readability and could clear a real read error while paused | §3.1 `FilePresence` metadata enum replaces probe-status claims; §3.2 read batches are authoritative with an explicit chip truth table; §6 chmod-000 retention test |
