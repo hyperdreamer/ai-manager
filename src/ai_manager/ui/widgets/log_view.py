@@ -135,6 +135,7 @@ class LogViewWidget(QWidget):
         else:
             self._pending_path_marker = None
         self._update_file_controls()
+        self._refresh_immediately()
 
     def set_service_state(self, state: ServiceRunState) -> None:
         """Update only the muted service-state line."""
@@ -143,10 +144,15 @@ class LogViewWidget(QWidget):
         )
 
     def set_paused(self, paused: bool) -> None:
-        """Gate content consumption; presence is still probed every tick."""
+        """Gate content consumption; presence is still probed every tick.
+
+        Resuming refreshes health immediately (including an immediate read
+        while the widget is polling), so the chip never waits for the next
+        timer tick to leave the paused state.
+        """
         self._paused = bool(paused)
         self._pause_button.setText("▶ Resume" if self._paused else "⏸ Pause")
-        self._refresh_health()
+        self._refresh_immediately()
 
     def set_follow(self, follow: bool) -> None:
         """Control auto-scroll only."""
@@ -283,8 +289,26 @@ class LogViewWidget(QWidget):
     # Health derivation and placeholder bookkeeping
     # ------------------------------------------------------------------
 
-    def _derive_health(self) -> Tuple[str, str, Optional[str]]:
-        """Return ``(category, chip text, placeholder)`` from current state."""
+    def _refresh_immediately(self) -> None:
+        """Refresh health now, polling when the widget is actively polling.
+
+        A hidden page performs no log syscalls (visibility contract), so it
+        only re-derives the chip from retained state; the first visible tick
+        polls.  A polling widget probes and reads synchronously so transitions
+        such as Resume or a path switch never wait on the timer.
+        """
+        if not self._paused and self._poll_timer.isActive():
+            self.poll_once()
+        else:
+            self._refresh_health()
+
+    def _derive_health(self) -> Optional[Tuple[str, str, Optional[str]]]:
+        """Return ``(category, chip text, placeholder)`` from current state.
+
+        ``None`` means the chip is retained: presence is ``PRESENT`` but no
+        read has succeeded for the current path yet, and a stat-only probe
+        must never promote the chip to Live by itself.
+        """
         if self._presence == FilePresence.UNSET:
             return "unset", _NO_LOG_PATH_CHIP, _NO_PATH_PLACEHOLDER
         if self._presence == FilePresence.MISSING:
@@ -295,18 +319,22 @@ class LogViewWidget(QWidget):
             reason, placeholder = _unreadable_texts(self._presence_reason)
             return "unreadable", _UNREADABLE_CHIP.format(reason), placeholder
 
-        # PRESENT: only an actual read may promote to Live or clear a retained
-        # read error, so missing/unreadable read observations win.
+        # PRESENT.  Only a read-observed UNREADABLE may outrank the pause
+        # dimension; every other retained status yields the paused row while
+        # paused.  A MISSING read observation still outranks OK (it must never
+        # show Live), and a never-read path retains the current chip.
         if self._last_read_status == LogFileStatus.UNREADABLE:
             reason, placeholder = _unreadable_texts(self._last_read_error)
             return "unreadable", _UNREADABLE_CHIP.format(reason), placeholder
+        if self._paused:
+            return "paused", _PAUSED_CHIP, None
         if self._last_read_status == LogFileStatus.MISSING:
             return "missing", _MISSING_CHIP, self._missing_placeholder(
                 self._last_read_error
             )
-        if self._paused:
-            return "paused", _PAUSED_CHIP, None
-        return "live", _LIVE_CHIP, None
+        if self._last_read_status == LogFileStatus.OK:
+            return "live", _LIVE_CHIP, None
+        return None
 
     def _missing_placeholder(self, message: Optional[str]) -> str:
         if message is not None and message.startswith(_MISSING_PREFIX):
@@ -321,7 +349,12 @@ class LogViewWidget(QWidget):
         return _NO_PATH_PLACEHOLDER
 
     def _refresh_health(self) -> None:
-        category, chip, placeholder = self._derive_health()
+        derived = self._derive_health()
+        if derived is None:
+            # No successful read of the current path yet: retain the current
+            # chip rather than promoting a stat-only PRESENT probe to Live.
+            return
+        category, chip, placeholder = derived
         self._health_chip.setText(chip)
         key = (category, placeholder)
         if key == self._health_key:

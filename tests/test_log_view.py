@@ -58,7 +58,12 @@ class StubReader:
 
     def read_new_lines(self):
         self.read_calls += 1
-        return self.batches.popleft() if self.batches else LogReadBatch([])
+        if self.batches:
+            return self.batches.popleft()
+        if self.path is None:
+            # Match the real reader: no target means status UNSET, not OK.
+            return LogReadBatch([], status=LogFileStatus.UNSET)
+        return LogReadBatch([])
 
 
 def make_view(qtbot):
@@ -368,6 +373,88 @@ def test_read_error_survives_paused_present_probe(qtbot):
     assert view._health_chip.text() == "● Live"
     assert "Cannot read log file" not in view.logView.toPlainText()
     assert "log file created" not in view.logView.toPlainText()
+
+
+def test_read_observed_missing_while_paused_shows_paused(qtbot):
+    view, stub = make_view(qtbot)
+    stub.presence = (FilePresence.PRESENT, None)
+    view.set_log_path("race.log")
+
+    # A read observes ENOENT after the PRESENT probe (the target was deleted or
+    # replaced between the stat and the open).
+    missing = "Log file not found: race.log"
+    stub.batches.append(
+        LogReadBatch([], status=LogFileStatus.MISSING, error=missing)
+    )
+    view.poll_once()
+    assert view._health_chip.text() == "⚠ Log file not found"
+    assert missing in view.logView.toPlainText()
+
+    # `PRESENT | paused | anything other than UNREADABLE` is the `⏸ Paused`
+    # row, and the stale read-observed placeholder must not survive.
+    view.set_paused(True)
+    assert view._health_chip.text() == "⏸ Paused"
+    assert stub.read_calls == 1
+    assert "Log file not found" not in view.logView.toPlainText()
+
+
+def test_resume_before_first_read_never_shows_live(qtbot):
+    view, stub = make_view(qtbot)
+    stub.presence = (FilePresence.PRESENT, None)
+    view.set_log_path("resume-first.log")
+
+    view.set_paused(True)
+    view.poll_once()  # probe PRESENT, but a paused tick consumes nothing
+    assert stub.read_calls == 0
+    assert view._health_chip.text() == "⏸ Paused"
+
+    # A stat-only PRESENT probe cannot promote the chip to Live: no read of the
+    # current path has succeeded yet.
+    view.set_paused(False)
+    assert view._health_chip.text() != "● Live"
+    assert stub.read_calls == 0
+
+    stub.batches.append(LogReadBatch([], status=LogFileStatus.OK))
+    view.poll_once()
+    assert view._health_chip.text() == "● Live"
+    assert stub.read_calls == 1
+
+
+def test_visible_resume_reads_immediately(qtbot):
+    view, stub = make_view(qtbot)
+    stub.presence = (FilePresence.PRESENT, None)
+    view.set_log_path("visible-resume.log")
+    view.show()
+    qtbot.waitExposed(view)
+    assert view.is_polling is True
+
+    view.set_paused(True)
+    view.poll_once()
+    reads_while_paused = stub.read_calls
+
+    # While the widget is polling, Resume probes and reads synchronously so the
+    # chip never waits for the one-second timer.
+    view.set_paused(False)
+    assert stub.read_calls == reads_while_paused + 1
+    assert view._health_chip.text() == "● Live"
+
+
+def test_visible_path_change_reads_immediately(qtbot):
+    view, stub = make_view(qtbot)
+    view.show()
+    qtbot.waitExposed(view)
+    assert view.is_polling is True
+
+    probes_before = stub.probe_calls
+    reads_before = stub.read_calls
+    stub.presence = (FilePresence.PRESENT, None)
+    view.set_log_path("switched.log")
+
+    # A path switch while actively polling refreshes the chip synchronously so
+    # the displayed state can never describe the previous path.
+    assert stub.probe_calls == probes_before + 1
+    assert stub.read_calls == reads_before + 1
+    assert view._health_chip.text() == "● Live"
 
 
 def test_service_state_and_file_health_are_independent(qtbot):
