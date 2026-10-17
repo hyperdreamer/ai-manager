@@ -236,8 +236,9 @@ increments `_autostart_cancel_epoch`; the claiming manager remembers the epoch a
 claim time and compares before spawning. Any manual Start/Stop from any window,
 and any quit, therefore invalidates a pending attempt process-wide, and the
 comparison survives nested event loops. The comparison uses a **local copy**
-captured before `_release_autostart_claim()` runs: release clears
-`self._autostart_epoch`, so comparing the field afterwards would always compare
+captured before the instance field is cleared: the callback nulls
+`self._autostart_epoch` *before* emitting status (so a re-entrant receiver cannot
+re-authorise — test 27), so comparing the field afterwards would always compare
 `None` against the live epoch and silently disable the automatic start entirely.
 
 **Authorisation is re-derived, never cached across the emit.** `status_updated` is
