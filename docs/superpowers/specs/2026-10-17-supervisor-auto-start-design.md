@@ -419,6 +419,8 @@ negative expectation with a non-busy positive control in the same test.
 | 23 | `direct_app_quit_cancels_via_about_to_quit` — `arm()`, then call `QApplication.instance().quit()` (not `_exit_application`) and process events; dispatch `aboutToQuit` and assert the claim is dead | pins the second cancellation hook, which test 20 does not cover |
 | 24 | `close_event_unsaved_prompt_path_keeps_the_attempt_until_confirmed` — `arm()`, `close_to_tray` disabled, `has_unsaved_changes()` forced true, `close()`; on Discard the exit path cancels the claim, on Cancel the claim stays live | covers the `closeEvent` prompt route (§3.4) |
 | 25 | `manual_start_from_another_window_cancels_pending_attempt` — `arm(A)`, `manager_b.start_supervisor()`, then A's stopped delivery; A spawns nothing | cross-manager manual-Start cancellation |
+| 26 | `only_the_claiming_manager_may_complete_the_claim` — B's ordinary poll cannot consume or authorise A's claim | pins the non-claimant path |
+| 27 | `reentrant_status_receiver_cannot_double_start` — a `status_updated` receiver that synchronously triggers another status delivery must not produce a second automatic start | pins clear-before-emit |
 
 Existing tests must keep passing unchanged, especially
 `tests/test_supervisor.py::test_stop_supervisor_runs_stop_command` (argv
