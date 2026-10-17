@@ -158,21 +158,22 @@ def _on_status_finished(self, exit_code: int, exit_status) -> None:
 
     self.status_updated.emit(status)
 
-    # ONE guard, three meanings, each mutation-pinned by a different test:
-    #   * claim_epoch is None            -> this manager never claimed (or already
-    #                                       consumed it) -> test 26 + test 3
-    #   * claim_epoch != cancel_epoch    -> a manual Start/Stop/quit happened, either
-    #                                       before this callback or inside the emit
-    #                                       above (synchronous receivers) -> test 18
-    #   * authorized is False            -> probe did not positively report stopped
-    #                                       -> tests 2, 7, 8, 9
+    # ONE guard, each half mutation-pinned by a different test:
+    #   * claim_epoch != cancel_epoch -> a manual Start/Stop/quit happened, before
+    #                                    this callback or inside the emit above
+    #                                    (synchronous receivers) -> tests 18, 27
+    #   * authorized is False         -> probe did not positively report stopped
+    #                                    -> tests 2, 7, 8, 9
+    # There is deliberately NO separate `claim_epoch is None` test: a non-claimant's
+    # epoch is None and `None != <int>` is already True, so such a test would be
+    # unreachable by mutation (verified) and is not written.
     authorized = (
         exit_code == 0
         and exit_status == QProcess.ExitStatus.NormalExit
         and SUPERVISOR_NOT_RUNNING_RE.search(output) is not None
         and SUPERVISOR_RUNNING_RE.search(output) is None
     )
-    if claim_epoch is None or claim_epoch != SupervisorManager._autostart_cancel_epoch:
+    if claim_epoch != SupervisorManager._autostart_cancel_epoch:
         return
     if not authorized:
         return
@@ -182,11 +183,11 @@ def _on_status_finished(self, exit_code: int, exit_status) -> None:
 
 Normative details:
 
-- There is exactly **one** decision guard (the combined `claim_epoch is None or
-  claim_epoch != _autostart_cancel_epoch` test) plus the `authorized` predicate.
-  Earlier drafts had three overlapping guards; two were unreachable by any test
-  mutation and were deleted. Do not reintroduce an owner pointer or a
-  `claimed_here` boolean.
+- There is exactly **one** epoch guard (`claim_epoch != _autostart_cancel_epoch`) plus
+  the `authorized` predicate. Earlier drafts had three overlapping guards; all
+  extra halves were unreachable by any test mutation and were deleted. Do not
+  reintroduce an owner pointer, a `claimed_here` boolean, or a `claim_epoch is
+  None` clause.
 - `claim_epoch` must be a **local variable** captured before the instance field is
   cleared. Comparing `self._autostart_epoch` afterwards would always compare
   `None` and silently disable the feature entirely.
@@ -546,13 +547,14 @@ the window module. Each row's assertion is mandatory.
 | # | Name | Assertions |
 | --- | --- | --- |
 | 19 | `constructor_requests_one_attempt` | monkeypatch `SupervisorManager.start_if_not_running` with a counting spy returning `True` **before** constructing; assert one call; assert the constructor never called `refresh_status` directly (spy on it, assert 0 calls from the constructor path) |
-| 20 | `quit_cancels_pending_autostart` | build the window with autostart enabled and pre-construct fakes; `assert_constructor_claim(window, probes)` (**do not** call `arm()` — the constructor already claimed); `window._exit_application()`; `window.supervisor_manager.claim_is_live() is False`; `deliver(stopped)` spawns nothing |
+| 20 | `quit_cancels_pending_autostart` | build the window with autostart enabled and pre-construct fakes; `assert_constructor_claim(window, probes)` (**do not** call `arm()` — the constructor already claimed); `window._exit_application()`; `window.supervisor_manager.claim_is_live() is False` **and `window.supervisor_manager._autostart_epoch is None`** (the instance field itself must be cleared by cancellation, not merely invalidated by the advanced epoch); `deliver(stopped)` spawns nothing |
 | 21 | `hiding_to_tray_keeps_pending_autostart` | request the existing `mock_tray_available` fixture (without it `closeEvent` takes the exit path), set `close_to_tray=True` **and** `first_close_notice_shown=True`, `window.show()` and assert it is visible first. Then `window.close()` returns `False` (the event was ignored), `window.isHidden()` is `True`, and the constructor's claim is still live |
 | 22 | `cancel_in_the_unsaved_changes_prompt_keeps_the_attempt` | `assert_constructor_claim(window, probes)` (no `arm()`); force `has_unsaved_changes()` True; monkeypatch `QMessageBox.question` to return `Cancel`; `window.handle_quit()`; claim still live |
-| 23 | `direct_app_quit_cancels_via_about_to_quit` | **must run in an isolated subprocess with a real event loop.** `app.quit()` + `processEvents()` outside `app.exec()` does *not* emit `aboutToQuit` (verified on this Qt 6.11 build), and emitting the signal by hand would only test the connection, not the path. The child script: create a real `QApplication`, a window with fakes installed pre-construct, stop its poll timer, keep it hidden, `QTimer.singleShot(0, app.quit)`, then `app.exec()` with a watchdog that exits non-zero if the loop outlives ~5 s. The child must **delete the inherited `AI_MANAGER_DISABLE_SUPERVISOR_AUTOSTART`** (`del os.environ[...]`) before constructing, or the attempt never arms and the test passes vacuously (observed in review). After a normal return assert: `aboutToQuit` fired, `_exit_application` was **not** called, `claim_is_live()` is False, and a late stopped delivery spawns nothing. Do **not** emit `aboutToQuit` manually. |
-| 24 | `close_event_unsaved_prompt_path_keeps_the_attempt_until_confirmed` | `assert_constructor_claim(window, probes)` (no `arm()`); `close_to_tray=False`; `has_unsaved_changes()` True; `QMessageBox.question` -> `Cancel`: window not closed, `claim_is_live()` True; then `Discard`: `claim_is_live()` False and a later `deliver(stopped)` spawns nothing |
+| 23 | `direct_app_quit_cancels_via_about_to_quit` | **must run in an isolated subprocess with a real event loop.** `app.quit()` + `processEvents()` outside `app.exec()` does *not* emit `aboutToQuit` (verified on this Qt 6.11 build), and emitting the signal by hand would only test the connection, not the path. The child script: create a real `QApplication`, a window with fakes installed pre-construct, stop its poll timer, keep it hidden, `QTimer.singleShot(0, app.quit)`, then `app.exec()` with a watchdog that exits non-zero if the loop outlives ~5 s. The child must **delete the inherited `AI_MANAGER_DISABLE_SUPERVISOR_AUTOSTART`** (`del os.environ[...]`) before constructing, or the attempt never arms and the test passes vacuously (observed in review). After a normal return assert: `aboutToQuit` fired, `_exit_application` was **not** called, `claim_is_live()` is False, `_autostart_epoch is None`, and a late stopped delivery spawns nothing. Do **not** emit `aboutToQuit` manually. |
+| 24 | `close_event_unsaved_prompt_path_keeps_the_attempt_until_confirmed` | `assert_constructor_claim(window, probes)` (no `arm()`); `close_to_tray=False`; `has_unsaved_changes()` True; `QMessageBox.question` -> `Cancel`: window not closed, `claim_is_live()` True and `_autostart_epoch` still set; then `Discard`: `claim_is_live()` False, **`_autostart_epoch is None`**, and a later `deliver(stopped)` spawns nothing |
 | 25 | `manual_start_from_another_window_cancels_pending_attempt` | Two windows, one shared `Popen` recorder, one fake probe each, constructed **A then B**. A's constructor claims (`assert_constructor_claim(a, a_probes)`); B's constructor **cannot** claim — assert `b_probes.starts == []` and `b.supervisor_manager.claim_is_live() is False` (the impossible two-owner state is never required). Then `b.start_supervisor()`; recorder is exactly `[[b.executable, "start"]]`. Deliver A's stopped result; recorder **unchanged** (A did not automatically start) |
-| 26 | `only_the_claiming_manager_may_complete_the_claim` — pins the `self._autostart_epoch is not None` check, which is what distinguishes the claiming manager now that there is no owner pointer. Construct B and let it take a plain status poll (**not** an autostart entry), so `b._autostart_epoch is None`; `arm(a)`; `deliver(b, SAMPLE_STOPPED_OUTPUT)`; assert B's recorder is empty **and** `a.claim_is_live() is True`; then `deliver(a, stopped)` spawns exactly one `start` | without the `is not None` check, B's `None == cancel_epoch` comparison or B's delivery would authorise/consume A's claim; mutation-verified in materialization |
+| 27 | `reentrant_status_receiver_cannot_double_start` — pins the **clear-before-emit** ordering, which no other test catches (verified: moving the clear after the emit leaves all other tests green). Connect a `status_updated` receiver that synchronously calls `manager.refresh_status()`, then delivers a second `SAMPLE_STOPPED_OUTPUT` through the real callback. Complete the follow-up probe as running. Deliver the outer status. Assert exactly **one** `start` argv: the nested callback must see `_autostart_epoch is None` because the clear happened before the emit. | if the clear were after the emit, the nested callback would still see a live epoch and spawn a second `start` (verified: two automatic starts) |
+| 26 | `only_the_claiming_manager_may_complete_the_claim` — pins the `self._autostart_epoch is not None` check, which is what distinguishes the claiming manager now that there is no owner pointer. Construct B and let it take a plain status poll (**not** an autostart entry), so `b._autostart_epoch is None`; `arm(a)`; `deliver(b, SAMPLE_STOPPED_OUTPUT)`; assert B's recorder is empty **and** `a.claim_is_live() is True`; then `deliver(a, stopped)` spawns exactly one `start` | B's `None` epoch fails the epoch comparison, so B can neither spawn nor clear A's field; the entry-side `_autostart_consumed` guard (test 11/25) is what stops B from claiming in the first place |
 
 ## 6. Preservation requirements
 
