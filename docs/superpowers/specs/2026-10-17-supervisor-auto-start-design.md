@@ -106,7 +106,7 @@ One UI-adjacent cleanup: `MainWindow._on_supervisor_btn_clicked`
 ### 3.1 Components
 
 All supervisor state and every `ai-backends` invocation live in
-`SupervisorManager` (`src/ai_manager/services/supervisor.py`). Three monotone
+`SupervisorManager` (`src/ai_manager/services/supervisor.py`). Two monotone
 process-wide values plus one per-manager value:
 
 ```python
@@ -162,8 +162,8 @@ _on_status_finished(exit_code: int, exit_status: QProcess.ExitStatus)
                 and exit_status == QProcess.ExitStatus.NormalExit
                 and SUPERVISOR_NOT_RUNNING_RE.search(output) is not None
                 and SUPERVISOR_RUNNING_RE.search(output) is None)
-  if claim_epoch is None or claim_epoch != SupervisorManager._autostart_cancel_epoch:
-      return                                        # not mine, or cancelled (incl. inside the emit)
+  if claim_epoch != SupervisorManager._autostart_cancel_epoch:
+      return                                        # not mine (None != int), or cancelled (incl. inside the emit)
   if not authorized:
       return
   if self._spawn_supervisor("start", silent=True):
