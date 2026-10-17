@@ -1,0 +1,110 @@
+# PM execution manifest for the supervisor-auto-start plan (epoch 1).
+# Derived by the PM from the validated source plan; never hand-edited.
+source_plan:
+  path: "docs/superpowers/plans/2026-10-17-supervisor-auto-start.md"
+  sha256: "69a16256045ed36dd676193f1b0ec3f74904265e8feb8d34bcd49052c1e28f18"
+  commit_oid: "a621f7e9a5e0e74544503c2513cd7ee7805f6c90"
+topic_slug: "supervisor-auto-start"
+epoch: 1
+lanes:
+  - id: fixtures
+    owns: ["tests/__init__.py", "tests/helpers.py", "tests/conftest.py"]
+    task_ids: ["T-001"]
+  - id: supervisor
+    owns: ["src/ai_manager/services/supervisor.py", "tests/test_supervisor_autostart.py"]
+    task_ids: ["T-002", "T-004"]
+  - id: window
+    owns: ["src/ai_manager/ui/main_window.py", "tests/test_main_window_autostart.py"]
+    task_ids: ["T-003"]
+tasks:
+  - id: T-001
+    plan_task: 1
+    title: "Add Test Safety Fixtures and Shared Doubles"
+    tier: standard
+    lane: fixtures
+    sequence: 1
+    depends_on: []
+    owns: ["tests/__init__.py", "tests/helpers.py", "tests/conftest.py"]
+    resources: []
+    produces: ["IF-001"]
+    consumes: []
+    validation:
+      - argv: ["/home/henry-arch/anaconda3/envs/daily/bin/python", "-m", "pytest", "tests/test_main_window.py", "-q"]
+        cwd: "."
+        env: {"PYTHONPATH": "src", "AI_WORKSPACE_ROOT": "/data/home/henry/Development/ai"}
+        timeout_seconds: 900
+  - id: T-002
+    plan_task: 2
+    title: "Add Autostart State, Guards, and Lifetime Tests"
+    tier: advanced
+    lane: supervisor
+    sequence: 1
+    depends_on: ["T-001"]
+    owns: ["src/ai_manager/services/supervisor.py", "tests/test_supervisor_autostart.py"]
+    resources: []
+    produces: ["IF-002"]
+    consumes: ["IF-001"]
+    validation:
+      - argv: ["/home/henry-arch/anaconda3/envs/daily/bin/python", "-m", "pytest", "tests/test_supervisor_autostart.py", "-q"]
+        cwd: "."
+        env: {"PYTHONPATH": "src", "AI_WORKSPACE_ROOT": "/data/home/henry/Development/ai"}
+        timeout_seconds: 900
+  - id: T-003
+    plan_task: 3
+    title: "Wire MainWindow to Autostart and Quit Cancellation"
+    tier: standard
+    lane: window
+    sequence: 1
+    depends_on: ["T-002"]
+    owns: ["src/ai_manager/ui/main_window.py", "tests/test_main_window_autostart.py"]
+    resources: []
+    produces: ["IF-003"]
+    consumes: ["IF-001", "IF-002"]
+    validation:
+      - argv: ["/home/henry-arch/anaconda3/envs/daily/bin/python", "-m", "pytest", "tests/test_main_window_autostart.py", "-q"]
+        cwd: "."
+        env: {"PYTHONPATH": "src", "AI_WORKSPACE_ROOT": "/data/home/henry/Development/ai"}
+        timeout_seconds: 900
+  - id: T-004
+    plan_task: 4
+    title: "Full-Suite Verification and Mutation Audit"
+    tier: advanced
+    lane: supervisor
+    sequence: 2
+    depends_on: ["T-002", "T-003"]
+    owns: ["src/ai_manager/services/supervisor.py", "tests/test_supervisor_autostart.py"]
+    resources: []
+    produces: []
+    consumes: ["IF-001", "IF-002", "IF-003"]
+    validation:
+      - argv: ["/home/henry-arch/anaconda3/envs/daily/bin/python", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {"PYTHONPATH": "src", "AI_WORKSPACE_ROOT": "/data/home/henry/Development/ai"}
+        timeout_seconds: 900
+interfaces:
+  produces:
+    - id: IF-001
+      producer: T-001
+      signature: "tests/helpers.py: FakeStatusProcess(state() -> QProcess.ProcessState, start(program: str, args: list[str] | None = None) -> None, finish() -> None, starts: list[list[str]]); install_fake_status_process(original_init) -> wrapper; tests/conftest.py: autouse _disable_supervisor_autostart, _no_destructive_supervisor_commands, _no_real_status_probe, and autostart_enabled; module-level AUTOSTART_DISABLE_ENV re-exported from supervisor"
+      sha256: 8a71a9e03768ce098a7387a7b8503c95e7695a5e75738f2fb2cfd97277b519f5
+    - id: IF-002
+      producer: T-002
+      signature: "SupervisorManager: _autostart_consumed: ClassVar[bool] = False; _autostart_cancel_epoch: ClassVar[int] = 0; self._autostart_epoch: Optional[int]; @staticmethod autostart_disabled() -> bool; start_if_not_running() -> bool; cancel_pending_autostart() -> None; claim_is_live() -> bool; _spawn_supervisor(command: str, *, silent: bool) -> bool; start_supervisor() -> None; stop_supervisor() -> None; _on_status_finished(exit_code: int, exit_status) -> None; _on_status_error(error) -> None"
+      sha256: c869bcbcc31e130a068a2b53f6c61cfb884ea269371e21ad7e014a5dcf5247ac
+    - id: IF-003
+      producer: T-003
+      signature: "MainWindow.__init__ calls supervisor_manager.start_if_not_running() once and connects QApplication.instance().aboutToQuit to cancel_pending_autostart; _exit_application() calls cancel_pending_autostart() first; _on_supervisor_btn_clicked() calls start_supervisor() once"
+      sha256: 9ceda7e38d3615eff7b42618ace49913e941376dfc62d622ad5f19d089b1cb8a
+  consumes:
+    - id: IF-001
+      consumers: ["T-002", "T-003", "T-004"]
+      signature: "tests/helpers.py: FakeStatusProcess(state() -> QProcess.ProcessState, start(program: str, args: list[str] | None = None) -> None, finish() -> None, starts: list[list[str]]); install_fake_status_process(original_init) -> wrapper; tests/conftest.py: autouse _disable_supervisor_autostart, _no_destructive_supervisor_commands, _no_real_status_probe, and autostart_enabled; module-level AUTOSTART_DISABLE_ENV re-exported from supervisor"
+      sha256: 8a71a9e03768ce098a7387a7b8503c95e7695a5e75738f2fb2cfd97277b519f5
+    - id: IF-002
+      consumers: ["T-003", "T-004"]
+      signature: "SupervisorManager: _autostart_consumed: ClassVar[bool] = False; _autostart_cancel_epoch: ClassVar[int] = 0; self._autostart_epoch: Optional[int]; @staticmethod autostart_disabled() -> bool; start_if_not_running() -> bool; cancel_pending_autostart() -> None; claim_is_live() -> bool; _spawn_supervisor(command: str, *, silent: bool) -> bool; start_supervisor() -> None; stop_supervisor() -> None; _on_status_finished(exit_code: int, exit_status) -> None; _on_status_error(error) -> None"
+      sha256: c869bcbcc31e130a068a2b53f6c61cfb884ea269371e21ad7e014a5dcf5247ac
+    - id: IF-003
+      consumers: ["T-004"]
+      signature: "MainWindow.__init__ calls supervisor_manager.start_if_not_running() once and connects QApplication.instance().aboutToQuit to cancel_pending_autostart; _exit_application() calls cancel_pending_autostart() first; _on_supervisor_btn_clicked() calls start_supervisor() once"
+      sha256: 9ceda7e38d3615eff7b42618ace49913e941376dfc62d622ad5f19d089b1cb8a

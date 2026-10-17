@@ -1,0 +1,36 @@
+// Derived from the execution-graph.yaml manifest; inspection artifact only.
+// topic: supervisor-auto-start  epoch: 1
+// source_plan sha256: 69a16256045ed36dd676193f1b0ec3f74904265e8feb8d34bcd49052c1e28f18
+digraph supervisor_auto_start {
+  rankdir=LR;
+  node [shape=box, style="rounded,filled", fontname="Helvetica"];
+  edge [fontname="Helvetica"];
+  subgraph cluster_fixtures {
+    label="lane: fixtures";
+    style="rounded,dashed"; color="#999999";
+    "T-001" [label="T-001\nplan task 1\nAdd Test Safety Fixtures and Shared Doubles\ntier: standard", fillcolor="#e8f4ea"];
+  }
+  subgraph cluster_supervisor {
+    label="lane: supervisor";
+    style="rounded,dashed"; color="#999999";
+    "T-002" [label="T-002\nplan task 2\nAdd Autostart State, Guards, and Lifetime Tests\ntier: advanced", fillcolor="#e8eef9"];
+    "T-004" [label="T-004\nplan task 4\nFull-Suite Verification and Mutation Audit\ntier: advanced", fillcolor="#e8eef9"];
+  }
+  subgraph cluster_window {
+    label="lane: window";
+    style="rounded,dashed"; color="#999999";
+    "T-003" [label="T-003\nplan task 3\nWire MainWindow to Autostart and Quit Cancellation\ntier: standard", fillcolor="#fdf1e3"];
+  }
+
+  "T-001" -> "T-002" [label="interface"];
+  "T-002" -> "T-003" [label="interface"];
+  "T-002" -> "T-004" [label="same-lane"];
+  "T-003" -> "T-004" [label="interface"];
+
+  "T-001" -> "T-002" [label="IF-001", color="#5b7ea8", style=dashed];
+  "T-001" -> "T-003" [label="IF-001", color="#5b7ea8", style=dashed];
+  "T-001" -> "T-004" [label="IF-001", color="#5b7ea8", style=dashed];
+  "T-002" -> "T-003" [label="IF-002", color="#5b7ea8", style=dashed];
+  "T-002" -> "T-004" [label="IF-002", color="#5b7ea8", style=dashed];
+  "T-003" -> "T-004" [label="IF-003", color="#5b7ea8", style=dashed];
+}
