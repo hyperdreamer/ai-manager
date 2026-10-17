@@ -2,7 +2,7 @@
 
 Date: 2026-10-17. Authority: [approved revision-4 design](2026-10-17-chat2api-file-bridge-design.md).
 
-This document specifies implementation of that design. The design takes precedence if a conflict is found. The unresolved cases in §14 require an answer before their affected behavior is implemented; they do not authorize a new product decision. This specification does not implement or deliver either target.
+This document specifies implementation of that design. The design takes precedence if a conflict is found. §14 records decisions that were open during drafting and are now resolved by explicit user decision; they are normative, not pending. This specification does not implement or deliver either target.
 
 ## 1. Source baseline and scope
 
@@ -952,9 +952,9 @@ Mutation(("server", "auth_token_env"), "delete")     # use service default
 ### 5.5 Blast-radius selection algorithm
 
 1. Materialize deep-copy before/after chat2api mappings by applying the effective addressed mutations, without modifying the saved tree. Obtain effective host/port with the schema defaults. If that pair is equal, return no matches without reading dependent files or showing a rewrite dialog. The launcher gate must have passed before any changed listener is submitted.
-2. Construct the ordinary old/new endpoint as `http://{host}:{port}`. A literal non-wildcard IPv6 address uses brackets (`http://[::1]:8000`); do not DNS-resolve names or treat localhost as an alias. Wildcard destination selection is unresolved in §14 and is not silently mapped to loopback.
+2. Construct the ordinary old/new endpoint as `http://{host}:{port}`. A literal IPv6 address uses brackets (`http://[::1]:8000`). Do not DNS-resolve names. Wildcard hosts cannot occur: R-HOST-LOOPBACK (§7.4) rejects `0.0.0.0` and `::` at save time, so this branch never has to translate a wildcard to loopback.
 3. Iterate only metadata with ids `ai-grammar`, `textkit`, `yt2txt` and kind `llm`, in registry order. Read each existing config's bytes once, hash those bytes, parse that same byte buffer with the round-trip YAML engine, and require a mapping root, a mapping `ai`, and a string `ai.api_base`. Do not call `ensure_config_exists`, `read_app_config`, or any mutating writer here. Reject symlink leaves and apply the same regular-file/writability rules as structured load. YAML anchors/aliases make a dependent ineligible for an automatic addressed rewrite; report that reason rather than changing an aliased node.
-4. Compare `saved_api_base.rstrip("/")` to `old_url.rstrip("/")` by exact string equality **after host-class normalization (R-HOST-CLASS, §7.4)**: `localhost`, `127.0.0.1`, and `[::1]`/`::1` are one equivalence class, so `http://localhost:8000` matches `http://127.0.0.1:8000`. Normalization lowercases only the host component and leaves port and path untouched. Do not match a substring, strip `/v1`, trim whitespace, or scan comments. Nonmatches do not participate. For a match, record the exact tree/bytes/hash and old base, with `new_api_base=new_url`. Derive `saved_config` from this tree using the existing LLM normalized-field rules without rereading the file. A named auth mismatch supplies `DependentMatch.auth_warning`.
+4. Compare using the **single shared comparator** `urls_match` (§7.4): strip **at most one** trailing `/` from each side, then `normalize_loopback_url` both and require exact equality. Do not use `rstrip("/")`, which would strip repeated slashes and turn `http://127.0.0.1:8000///` into a match. Repeated trailing slashes are a deliberate **negative** case. Nonmatches do not participate. For a match, record the exact tree/bytes/hash and old base, with `new_api_base=new_url`. Derive `saved_config` from this tree using the existing LLM normalized-field rules without rereading the file. A named auth mismatch supplies `DependentMatch.auth_warning`.
 5. An unreadable/missing/malformed/ineligible dependent raises `ConfigLoadError` with the dependent-inspection message. MainWindow retains the primary draft, shows that error, and refuses the attempted combined save; it never silently counts an uninspected dependent as unaffected or materializes its example. Successful detection with zero matches skips the dialog and saves the primary alone.
 6. With matches, show `BlastRadiusDialog`. All rewrite checkboxes start unchecked, making selection explicitly opt-in. `Save with Selected Updates` uses just the checked ids; zero checked is a one-file transaction. `Save chat2api Only` selects none. Cancel performs no validation or write. Selection returns ids, not editable copies of API keys/models.
 7. For each selected match, call `render_app_config` on its captured tree with the single callback `doc["ai"]["api_base"] = match.new_api_base`. Keep the captured digest. Assemble rendered and expected mappings keyed by the normalized resolved target paths, including the primary. Their exact key sets must agree. A later hand edit, including after the dialog, is caught by transaction prepare; do not recapture a newer digest while retaining an old tree.
@@ -1216,6 +1216,8 @@ The whole-URL comparison is what makes path suffixes significant:
 | `https://127.0.0.1:8000` | **no** (scheme differs) |
 | `http://127.0.0.1:8000/?x=1` | **no** (query preserved) |
 | `http://0.0.0.0:8000` | **no** (not loopback; cannot be saved anyway) |
+| `http://127.0.0.1:8000///` | **no** (only one trailing `/` is stripped) |
+| `http://user:pw@127.0.0.1:8000` | **no** (userinfo preserved, so not equal) |
 
 The trailing-slash rule is: strip **at most one** trailing `/` from each raw
 string before normalization; do not strip repeatedly and do not strip a path
@@ -1934,7 +1936,7 @@ Use F-C with the following complete `server` objects, keeping its models unchang
 ]
 ```
 
-First five fail; ports 1 and 65535 pass; empty host and the next three auth names fail; final three pass in-process. Named/default auth success in service validation additionally requires the corresponding environment variable or `.env` value.
+The 23 rows above partition as follows. **Valid (8):** rows 6, 7, 12, 13, 14, 15, 16, 17 — ports 1 and 65535; `_TOKEN_9`; explicit `null`; defaulted auth; `localhost`; `LOCALHOST`; `::1`. **Invalid (15):** rows 1–5, 8–11, and 18–23. Rows 18–23 are the loopback rule: `0.0.0.0`, `::`, `192.0.2.5`, `" localhost "`, `"localhost\n"`, and `127.0.0.2` all fail R-HOST-LOOPBACK. Named/default auth success in service validation additionally requires the corresponding environment variable or `.env` value.
 
 For F-F replace exactly one scalar with the YAML literal selected below. These are replacement scalar literals, not strings passed through a coercing parser:
 
@@ -2141,6 +2143,8 @@ Required cases:
     | `https://127.0.0.1:8000` | **no** |
     | `http://127.0.0.1:8000/?x=1` | **no** |
     | `http://0.0.0.0:8000` | **no** |
+    | `http://127.0.0.1:8000///` | **no** |
+    | `http://user:pw@127.0.0.1:8000` | **no** |
 
     Host normalization is comparison-only and is **never** applied on write;
     the dependent receives exactly `new_url`.
