@@ -15,7 +15,9 @@ files and `tests/conftest.py` are added/changed. No UI, no settings, no
 | --- | --- |
 | `src/ai_manager/services/supervisor.py` | autostart state, entry point, cancellation, factored spawn helper |
 | `src/ai_manager/ui/main_window.py` | one constructor call, one `aboutToQuit` connection, cancellation in `_exit_application`, collapsed button branch |
-| `tests/conftest.py` | autouse env guard + opt-in autostart fixture |
+| `tests/conftest.py` | autouse env guard, autouse spawn recorder, autouse inert-probe wrapper, opt-in autostart fixture |
+| `tests/__init__.py` | new, empty (deterministic `tests.helpers` import) |
+| `tests/helpers.py` | new: `FakeStatusProcess`, `install_fake_status_process` |
 | `tests/test_supervisor_autostart.py` | new, tests 1-18 |
 | `tests/test_main_window_autostart.py` | new, tests 19-25 |
 
@@ -36,7 +38,6 @@ from typing import ClassVar, Optional
 class SupervisorManager(QObject):
     _autostart_consumed: ClassVar[bool] = False
     _autostart_cancel_epoch: ClassVar[int] = 0
-    _autostart_owner: ClassVar[Optional["SupervisorManager"]] = None
 ```
 
 Contract:
@@ -45,12 +46,18 @@ Contract:
 | --- | --- | --- | --- |
 | `_autostart_consumed` | `bool` | yes (`False -> True` only) | the single process-wide automatic attempt has been claimed |
 | `_autostart_cancel_epoch` | `int` | yes (increments) | incremented by every manual Start/Stop/quit cancellation |
-| `_autostart_owner` | `Optional[SupervisorManager]` | no | the manager whose probe owns the claim; `None` when no live claim |
-| `self._autostart_epoch` | `Optional[int]` | no | per-instance snapshot of the cancel epoch taken at claim time |
+| `self._autostart_epoch` | `Optional[int]` | no | the **claiming manager's** snapshot of the cancel epoch at claim time; `None` for every manager that did not claim |
 
-All three class attributes are read and written as
-`SupervisorManager.<name>`, never via `self`, so no instance attribute can shadow
-them.
+Read and write both class attributes as `SupervisorManager.<name>`, never via
+`self`, so no instance attribute can shadow them.
+
+**Why there is no `_autostart_owner`.** An owner pointer was considered and
+removed: because `_autostart_consumed` is monotone and process-wide, at most one
+manager can ever claim, and every other manager keeps `_autostart_epoch is None`.
+`self._autostart_epoch is not None` therefore *is* the "I am the claiming manager"
+test, and an explicit owner attribute would be a second, redundant source of truth
+that no test could distinguish (deleting it left the suite green — a mutation-pin
+gap, not a feature). One field, one meaning.
 
 ### 2.3 `__init__` additions
 
@@ -83,26 +90,22 @@ def start_if_not_running(self) -> bool:
         return False
     if SupervisorManager._autostart_consumed:
         return False
-    if SupervisorManager._autostart_owner is not None:
-        return False
     if self._status_process.state() != QProcess.ProcessState.NotRunning:
         return False
     SupervisorManager._autostart_consumed = True
-    SupervisorManager._autostart_owner = self
     self._autostart_epoch = SupervisorManager._autostart_cancel_epoch
     self.refresh_status()
     return True
 ```
 
-Order of the guards is normative: disabled -> consumed -> owned -> busy. The busy
-guard must precede the claim so that `True` implies a probe really started.
+Order of the guards is normative: disabled -> consumed -> busy. The busy guard
+must precede the claim so that `True` implies a probe really started.
 
 ### 2.6 `cancel_pending_autostart() -> None`
 
 ```python
 def cancel_pending_autostart(self) -> None:
     SupervisorManager._autostart_cancel_epoch += 1
-    SupervisorManager._autostart_owner = None
 ```
 
 Must not touch `_autostart_consumed`. Safe to call at any time, including before
@@ -112,7 +115,6 @@ any claim and repeatedly.
 
 ```python
 def _release_autostart_claim(self) -> None:
-    SupervisorManager._autostart_owner = None
     self._autostart_epoch = None
 ```
 
@@ -125,10 +127,11 @@ def _on_status_finished(self, exit_code: int, exit_status) -> None:
     output = self._status_output_buffer.decode("utf-8", errors="replace")
     status = parse_supervisor_status(output)
 
+    # `claim_epoch is not None` means THIS manager claimed: only the claiming
+    # manager ever has a non-None epoch (see §2.2).
     claim_epoch = self._autostart_epoch
     claimed_here = (
-        SupervisorManager._autostart_owner is self
-        and claim_epoch is not None
+        claim_epoch is not None
         and claim_epoch == SupervisorManager._autostart_cancel_epoch
     )
     if claimed_here:
@@ -170,8 +173,7 @@ Normative details:
 def _on_status_error(self, error) -> None:
     claim_epoch = self._autostart_epoch
     if (
-        SupervisorManager._autostart_owner is self
-        and claim_epoch is not None
+        claim_epoch is not None
         and claim_epoch == SupervisorManager._autostart_cancel_epoch
     ):
         self._release_autostart_claim()
@@ -316,7 +318,36 @@ def _no_destructive_supervisor_commands(monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", guard)
     yield
-    assert destructive == [], f"tests must not spawn ai-backends: {destructive}" 
+    assert destructive == [], f"tests must not spawn ai-backends: {destructive}"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_status_probe(monkeypatch):
+    """Second safety layer, applied to EVERY test including existing fixtures.
+
+    `SupervisorManager.refresh_status()` calls `QProcess.start(exe, ["status"])`,
+    which the Popen guard cannot see. Materialization proved this matters: without
+    this wrapper, ordinary window fixtures made five real
+    `/home/bin/ai-backends status` launches during one suite run.
+
+    Patching `SupervisorManager.__init__` (rather than each fixture individually)
+    means every manager — including those built by `tests/test_main_window.py`,
+    `test_main_window_tray.py`, `test_mnemonic.py`, and `test_e2e_integration.py`
+    — gets its `_status_process` replaced by an inert fake BEFORE the constructor
+    returns, so `MainWindow.__init__`'s autostart probe can never exec the real
+    script. Existing fixtures need no edits.
+
+    Tests that need a live fake (the `autostart_enabled` opt-ins) install their own
+    fake on the instance after construction, replacing the wrapper's fake.
+    """
+    from tests.helpers import install_fake_status_process
+
+    monkeypatch.setattr(
+        SupervisorManager,
+        "__init__",
+        install_fake_status_process(SupervisorManager.__init__),
+    )
+
 
 @pytest.fixture
 def autostart_enabled(monkeypatch):
@@ -324,12 +355,20 @@ def autostart_enabled(monkeypatch):
     monkeypatch.delenv(AUTOSTART_DISABLE_ENV, raising=False)
     monkeypatch.setattr(SupervisorManager, "_autostart_consumed", False)
     monkeypatch.setattr(SupervisorManager, "_autostart_cancel_epoch", 0)
-    monkeypatch.setattr(SupervisorManager, "_autostart_owner", None)
     yield
 ```
 
-Both fixtures are function-scoped. Order matters: `autostart_enabled` depends on
-the autouse fixture having set the variable, then deletes it.
+All four fixtures are function-scoped. Order matters: `autostart_enabled` depends
+on `_disable_supervisor_autostart` having set the variable, then deletes it.
+`_no_real_status_probe` must run before any manager exists; pytest applies autouse
+fixtures before the test's own fixtures, and all of these are autouse or requested
+explicitly by the manager fixtures, so the wrapper is in place first.
+
+### 4.1a `tests/__init__.py` (new, empty)
+
+Required so `from tests.helpers import ...` collects deterministically. The
+package has no `tests/__init__.py` today and materialization showed the import
+fails without it. An empty file is sufficient.
 
 ### 4.1b `tests/helpers.py` (new)
 
@@ -411,7 +450,6 @@ def deliver(manager, output, code=0, status=QProcess.ExitStatus.NormalExit):
 def arm(manager):
     assert manager.start_if_not_running() is True
     assert len(manager._status_process.starts) == 1
-    assert SupervisorManager._autostart_owner is manager
     assert manager._autostart_epoch == SupervisorManager._autostart_cancel_epoch
     return manager._autostart_epoch
 ```
@@ -443,7 +481,6 @@ directly:
 def assert_constructor_claim(window, probes):
     assert len(probes.starts) == 1
     assert SupervisorManager._autostart_consumed is True
-    assert SupervisorManager._autostart_owner is window.supervisor_manager
     assert (window.supervisor_manager._autostart_epoch
             == SupervisorManager._autostart_cancel_epoch)
 ```
@@ -485,13 +522,13 @@ the window module. Each row's assertion is mandatory.
 | # | Name | Assertions |
 | --- | --- | --- |
 | 19 | `constructor_requests_one_attempt` | monkeypatch `SupervisorManager.start_if_not_running` with a counting spy returning `True` **before** constructing; assert one call; assert the constructor never called `refresh_status` directly (spy on it, assert 0 calls from the constructor path) |
-| 20 | `quit_cancels_pending_autostart` | build window with autostart enabled and fakes; `arm(window.supervisor_manager)`; `window._exit_application()`; claim is dead (`_autostart_owner is None`); `deliver(stopped)` spawns nothing |
+| 20 | `quit_cancels_pending_autostart` | build the window with autostart enabled and pre-construct fakes; `assert_constructor_claim(window, probes)` (**do not** call `arm()` — the constructor already claimed); `window._exit_application()`; the claim is dead (`window.supervisor_manager._autostart_epoch is None`); `deliver(stopped)` spawns nothing |
 | 21 | `hiding_to_tray_keeps_pending_autostart` | request the existing `mock_tray_available` fixture (without it `closeEvent` takes the exit path), set `close_to_tray=True` **and** `first_close_notice_shown=True`, `window.show()` and assert it is visible first. Then `window.close()` returns `False` (the event was ignored), `window.isHidden()` is `True`, and the constructor's claim is still live |
 | 22 | `cancel_in_the_unsaved_changes_prompt_keeps_the_attempt` | `assert_constructor_claim(window, probes)` (no `arm()`); force `has_unsaved_changes()` True; monkeypatch `QMessageBox.question` to return `Cancel`; `window.handle_quit()`; claim still live |
 | 23 | `direct_app_quit_cancels_via_about_to_quit` | **must run in an isolated subprocess with a real event loop.** `app.quit()` + `processEvents()` outside `app.exec()` does *not* emit `aboutToQuit` (verified on this Qt 6.11 build), and emitting the signal by hand would only test the connection, not the path. The child script: create a real `QApplication`, a window with fakes installed pre-construct, stop its poll timer, keep it hidden, `QTimer.singleShot(0, app.quit)`, then `app.exec()` with a watchdog that exits non-zero if the loop outlives ~5 s. After a normal return assert: `aboutToQuit` fired, `_exit_application` was **not** called, the claim is dead, and a late stopped delivery spawns nothing. Do **not** emit `aboutToQuit` manually. |
-| 24 | `close_event_unsaved_prompt_path_keeps_the_attempt_until_confirmed` | `close_to_tray=False`; `has_unsaved_changes()` True; `QMessageBox.question` -> `Cancel`: window not closed, claim live; then `Discard`: claim dead |
-| 25 | `manual_start_from_another_window_cancels_pending_attempt` | Both windows share one `Popen` recorder. Assert the constructor claims for A and B are in place, then `b.start_supervisor()` and immediately assert the recorder is exactly `[[b.executable, "start"]]`. Deliver A's stopped result and assert the recorder is **unchanged**: one manual Start, no additional automatic Start |
-| 26 | `only_the_claiming_manager_completes_the_claim` — **pins the owner check, which no other test catches** (verified: removing it leaves every other test green). Construct B first and let B take a *read-only* poll without claiming (B's poll is not an autostart probe, so `_autostart_owner` stays `None`); then `arm(a)`; then `deliver(b, SAMPLE_STOPPED_OUTPUT)` and assert `b.popens == []`, `_autostart_owner is a`, and A's claim is still live; `deliver(a, stopped)` then spawns exactly one `start` | the callback's `_autostart_owner is self` comparison is the only thing preventing B from consuming and authorising A's claim |
+| 24 | `close_event_unsaved_prompt_path_keeps_the_attempt_until_confirmed` | `assert_constructor_claim(window, probes)` (no `arm()`); `close_to_tray=False`; `has_unsaved_changes()` True; `QMessageBox.question` -> `Cancel`: window not closed, claim live; then `Discard`: claim dead |
+| 25 | `manual_start_from_another_window_cancels_pending_attempt` | Two windows, one shared `Popen` recorder, one fake probe each, constructed **A then B**. A's constructor claims (`assert_constructor_claim(a, a_probes)`); B's constructor **cannot** claim — assert `b_probes.starts == []` and `b.supervisor_manager._autostart_epoch is None` (the impossible two-owner state is never required). Then `b.start_supervisor()`; recorder is exactly `[[b.executable, "start"]]`. Deliver A's stopped result; recorder **unchanged** (A did not automatically start) |
+| 26 | `only_the_claiming_manager_may_complete_the_claim` — pins the `self._autostart_epoch is not None` check, which is what distinguishes the claiming manager now that there is no owner pointer. Construct B and let it take a plain status poll (**not** an autostart entry), so `b._autostart_epoch is None`; `arm(a)`; `deliver(b, SAMPLE_STOPPED_OUTPUT)`; assert B's recorder is empty **and** A's claim is still live (`a._autostart_epoch == _autostart_cancel_epoch`); then `deliver(a, stopped)` spawns exactly one `start` | without the `is not None` check, B's `None == cancel_epoch` comparison or B's delivery would authorise/consume A's claim; mutation-verified in materialization |
 
 ## 6. Preservation requirements
 
