@@ -118,7 +118,6 @@ class SupervisorManager(QObject):
     # through `self`, so no instance attribute can shadow them.
     _autostart_consumed: ClassVar[bool] = False   # False -> True, never back
     _autostart_cancel_epoch: ClassVar[int] = 0    # ++ on every manual Start/Stop
-    _autostart_owner: ClassVar[Optional["SupervisorManager"]] = None
 
     # Per-manager: the epoch stamped on the probe that claimed the attempt.
     self._autostart_epoch: Optional[int] = None
@@ -142,10 +141,8 @@ button branch.
 start_if_not_running() -> bool
   if autostart_disabled():                            return False
   if SupervisorManager._autostart_consumed:           return False
-  if SupervisorManager._autostart_owner is not None:  return False
   if self._status_process.state() != NotRunning:      return False   # nothing would be launched
   SupervisorManager._autostart_consumed = True                      # consume at claim time
-  SupervisorManager._autostart_owner = self
   self._autostart_epoch = SupervisorManager._autostart_cancel_epoch
   self.refresh_status()                                             # a probe really starts
   return True
@@ -154,37 +151,31 @@ _on_status_finished(exit_code: int, exit_status: QProcess.ExitStatus)
   output = self._status_output_buffer.decode("utf-8", errors="replace")
   status = parse_supervisor_status(output)
 
-  # Locals, so releasing the claim below cannot invalidate the comparison.
+  # Local copy: clearing the instance field below must not invalidate it.
+  # A non-claimant's field is None, which is exactly the "not my claim" test.
   claim_epoch = self._autostart_epoch
-  claimed_here = (SupervisorManager._autostart_owner is self
-                  and claim_epoch is not None
-                  and claim_epoch == SupervisorManager._autostart_cancel_epoch)
-  if claimed_here:
-      self._release_autostart_claim()               # before any side effect
+  self._autostart_epoch = None
+
   self.status_updated.emit(status)                  # ordinary rendering, unchanged
-  if not claimed_here:
+
+  authorized = (exit_code == 0
+                and exit_status == QProcess.ExitStatus.NormalExit
+                and SUPERVISOR_NOT_RUNNING_RE.search(output) is not None
+                and SUPERVISOR_RUNNING_RE.search(output) is None)
+  if claim_epoch is None or claim_epoch != SupervisorManager._autostart_cancel_epoch:
+      return                                        # not mine, or cancelled (incl. inside the emit)
+  if not authorized:
       return
-  if not (exit_code == 0
-          and exit_status == QProcess.ExitStatus.NormalExit
-          and SUPERVISOR_NOT_RUNNING_RE.search(output) is not None
-          and SUPERVISOR_RUNNING_RE.search(output) is None):
-      return
-  if claim_epoch != SupervisorManager._autostart_cancel_epoch:
-      return                                        # cancelled while we emitted
   if self._spawn_supervisor("start", silent=True):
       self.refresh_status()                         # ordinary follow-up probe
 
 _on_status_error(error)
-  claim_epoch = self._autostart_epoch
-  if (SupervisorManager._autostart_owner is self
-          and claim_epoch is not None
-          and claim_epoch == SupervisorManager._autostart_cancel_epoch):
-      self._release_autostart_claim()
+  self._autostart_epoch = None                      # per-instance; no-op for non-claimants
   self.status_updated.emit(SupervisorStatus(is_running=False, supervisor_pid=None, services={}))
 
-_release_autostart_claim()
-  SupervisorManager._autostart_owner = None
-  self._autostart_epoch = None
+claim_is_live() -> bool                             # read-only helper for tests/§3
+  return (self._autostart_epoch is not None
+          and self._autostart_epoch == SupervisorManager._autostart_cancel_epoch)
 
 start_supervisor()          # toolbar + tray "Start All Services"
   self.cancel_pending_autostart()
@@ -197,8 +188,8 @@ stop_supervisor()           # toolbar + tray "Stop All Services"
       self.refresh_status()
 
 cancel_pending_autostart()
-  SupervisorManager._autostart_cancel_epoch += 1     # monotone; invalidates any claim
-  SupervisorManager._autostart_owner = None          # never restores _autostart_consumed
+  SupervisorManager._autostart_cancel_epoch += 1     # monotone; invalidates any manager's claim
+  self._autostart_epoch = None                       # this manager's own claim is dead too
 ```
 
 `_spawn_supervisor(command, *, silent) -> bool` is today's spawn body, factored
@@ -231,11 +222,14 @@ False means "this process has not used its attempt"; True means "it is spent", a
 no entry call, cancellation, failure, or new window can return it to False.
 Cancelling therefore cannot make the attempt eligible again.
 
-**The claim is owned, not global-only.** `_autostart_owner` identifies the manager
-whose probe claimed the attempt, and only that manager's terminal callback may act
-on it. Another manager's poll — running or failing — cannot consume the claim,
-cannot suppress the attempt, and cannot authorise a spawn from a probe it did not
-send.
+**The claim is implicitly owned by the claiming manager.** At most one manager can
+claim, because `_autostart_consumed` is monotone and process-wide; every other
+manager keeps `self._autostart_epoch is None`. That `None` *is* the "I am not the
+claiming manager" test, so another manager's poll — running or failing — cannot
+consume the claim, cannot suppress it, and cannot authorise a spawn from a probe it
+did not send. (An explicit `_autostart_owner` pointer was specified in an earlier
+draft and then removed: it duplicated the `None` test, and no test could
+distinguish its presence, so it was a redundant source of truth.)
 
 **Cancellation is a monotone epoch, not a flag.** `cancel_pending_autostart()`
 increments `_autostart_cancel_epoch`; the claiming manager remembers the epoch at
@@ -355,7 +349,7 @@ Two new test files plus shared fixtures in `tests/conftest.py`.
 - `autostart_env` opt-in fixture that `monkeypatch.delenv(...)`s the variable and
   resets process state **with restoration**:
   `monkeypatch.setattr(SupervisorManager, "_autostart_consumed", False)`,
-  `... "_autostart_owner", None)`, `... "_autostart_cancel_epoch", 0)`.
+  `... "_autostart_cancel_epoch", 0)`.
   Because these are process-wide, each test must both reset and restore them, and
   must cancel/await outstanding probes before its patches are undone.
 
@@ -384,7 +378,7 @@ def arm(manager, probes):
     """Claim the attempt and prove a probe was really launched."""
     assert manager.start_if_not_running() is True
     assert probes.count == 1                      # a QProcess.start really happened
-    assert SupervisorManager._autostart_owner is manager
+    assert manager.claim_is_live() is True
     assert manager._autostart_epoch == SupervisorManager._autostart_cancel_epoch
     return manager._autostart_epoch
 ```
