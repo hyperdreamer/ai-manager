@@ -1,8 +1,8 @@
-# chat2api and file-bridge Management — Design (revision 3)
+# chat2api and file-bridge Management — Design (revision 4)
 
 **Date:** 2026-10-17
 **Status:** Revised after two rounds of frontier design review
-**Supersedes:** revision 2 (committed as `b3949ea`, content `ac5d6c9`)
+**Supersedes:** revision 3 (committed as `548cc7f`)
 **Delivery targets:** two repositories (see §1)
 
 > **Provenance note.** An unapproved intermediate commit (`374dc1f`) briefly
@@ -10,6 +10,26 @@
 > rejected in favour of fixing the launcher. That commit was removed from this
 > branch by rebase before review round 2. This revision supersedes the approved
 > revision-2 content, not that commit.
+
+## Revision 4 Summary
+
+Review round 3 returned **0 blockers, 2 majors, 2 minors**. Round-3 corrections:
+
+- **R3-M1 (probe auth).** The launcher probe fixture must set
+  `server.auth_token_env: null`. Verified end-to-end during design: with null and
+  an `echo` provider, chat2api binds and serves `/v1/models` in ~2 s offline.
+  Without it the probe would fail on `validate_auth()` for reasons unrelated to
+  the launcher. Child exit detection and guaranteed reap added.
+- **R3-M2 (staging purity).** `write_app_config` mutates, so it cannot stage a
+  dependent update. A pure `render_app_config` is required, and the dispatch
+  table is corrected. Staging-failure must leave every target byte-identical.
+- **R3-m1 (validation wording).** The auth-variable asymmetry is now stated:
+  checked whenever the validator runs, not part of the unconditional guarantee.
+- **R3-m2 (test inventory).** file-bridge **does** have a pytest harness
+  (revision 3 wrongly denied it); `test_model_fetcher.py` added as affected.
+- Ambiguity 3 resolved: the launcher binds one interpreter variable used for both
+  the config read and the final `exec`; ai-manager re-derives the search and
+  verifies with an import probe, so no code is shared across repositories.
 
 ## Revision 3 Summary
 
@@ -201,13 +221,30 @@ Required behaviour:
 
 **Interpreter contract (major M1).** The launcher has three interpreter
 branches: `.venv/bin/activate`, `venv/bin/activate`, then ambient `python`. The
-validator must use the **same resolution**. A single shared helper
-(`_resolve_service_python`) implements: for each of `.venv/bin/python`,
-`venv/bin/python`, then `python` on `PATH`, return the first that exists and is
-executable. Both the launcher's config read and ai-manager's stage-3 validator
-use that helper's result, so "validator unavailable" means the launcher cannot
-run either. This removes the revision-2 defect where a working `venv/` was
-reported as unavailable.
+validator must use the **same resolution**, and both must end in the **same
+interpreter that ultimately runs uvicorn**.
+
+Because chat2api's only permitted change is `start.sh`, the helper cannot live in
+chat2api's Python source. The mechanism is:
+
+- `start.sh` selects its interpreter once into a shell variable and then uses
+  that same variable for both the config read and the final `exec`, so the
+  process that reads the config and the process that serves requests are
+  guaranteed to be the same interpreter. Concretely: resolve to `PY=...`, run
+  `"$PY" -c '<config read>'` to obtain host/port, then
+  `exec "$PY" -m uvicorn ...`.
+- ai-manager does **not** share code with chat2api. It re-derives the interpreter
+  by applying the same three-step search against the app directory, then
+  verifies the result behaves as a chat2api interpreter by running a one-line
+  import probe (`import app, fastapi`). If the probe fails, the interpreter is
+  treated as unavailable (degraded notice); if it succeeds, it is used for stage
+  3. This keeps the two repositories independent while making the validator's
+  interpreter the same *kind* of interpreter the launcher will pick, and the
+  probe distinguishes "wrong interpreter" from "module missing".
+- The plan adds a test asserting that for a fixture app directory containing
+  only `venv/`, both the launcher path and ai-manager's resolution pick
+  `venv/bin/python`; and that with no virtualenv present, both pick the ambient
+  `python`.
 
 **Known remaining race (blocker B2, second part).** The launcher reads the
 config to build uvicorn arguments, and then `app.main`'s lifespan loads the
@@ -222,18 +259,28 @@ limitation.
 **Acceptance (blocker B2).** Argument-construction tests are insufficient. The
 test must:
 
-1. Write a temporary config with an ephemeral free port.
-2. Invoke the real `start.sh` with `CHAT2API_CONFIG` pointing at it and a
-   provider set that starts without credentials (an `echo` `--host`/`--port`
-   only; discovery and login are skipped when no `account`/`password` is
-   configured).
-3. Poll the configured socket until it accepts a connection, or time out.
+1. Write a temporary config with an ephemeral free port, an `echo` provider, and
+   **`server.auth_token_env: null`**. Authentication must be explicitly
+   disabled: `ServerConfig` defaults `auth_token_env` to `CHAT2API_TOKEN`, and
+   the lifespan calls `validate_auth()` before provider startup, so a probe
+   omitting this field would fail for a reason unrelated to the launcher. This
+   exact fixture was verified end-to-end during design: with `auth_token_env:
+   null`, the echo config binds and serves `/v1/models` in ~2 s with no network
+   access and no credentials.
+2. Invoke the real `start.sh` with `CHAT2API_CONFIG` pointing at it.
+3. Poll the configured loopback socket until it accepts a connection, or time
+   out. The probe **also** detects premature child exit: if the process exits
+   non-zero before binding, the test fails with the child's captured stderr
+   rather than waiting out the timeout.
 4. Assert the configured port is bound and, where feasible, that the old
    default is **not**.
 5. Assert a user-supplied later `--port` wins over the config value.
 6. Assert a missing or invalid config exits non-zero without binding anything.
+7. **Always** terminate and reap the child on every outcome, including timeout
+   and assertion failure, so a leaked server cannot poison later runs.
 
-This is a required automated test, not an optional manual probe.
+This is a required automated test, not an optional manual probe. The GUI's
+runtime gate uses the same fixture and the same readiness rule.
 
 ## 2. Registry boundary
 
@@ -249,7 +296,8 @@ Kind dispatch is exhaustive across the config surface, not just reads:
 | Operation | `llm` | `chat2api` | `file-bridge` | Unknown kind |
 | --- | --- | --- | --- | --- |
 | load | `read_app_config` | `structured.load` | `structured.load` | raise |
-| render | `write_app_config` | `structured.render` | `structured.render` | raise |
+| render | `write_app_config` (**mutation; not used for staged edits**) | `structured.render` | `structured.render` | raise |
+| render for transaction | `render_app_config` (new pure function, §3) | `structured.render` | `structured.render` | raise |
 | missing file | auto-create from example (existing behaviour, unchanged) | empty sections + explicit "create from example" action | empty sections + explicit action | raise |
 | validation | none (unchanged) | §4 stage 2 + 3 | §4 stage 2 + 3 | raise |
 | commit | `write_app_config` | `structured.commit` | `structured.commit` | raise |
@@ -360,27 +408,44 @@ baseline. There is no code path that writes past a detected stale hash.
 ### Multi-file transaction (D7, rebuilt per major M4)
 
 A blast-radius save writes `1 + n` files where `n` is the number of checked
-dependents, `0 <= n <= 3`. Revision 2 described this as "four files" and left
-the mechanics to `write_app_config`, which is single-file. The protocol is now
-an explicit transaction:
+dependents, `0 <= n <= 3`.
+
+**Pure rendering is mandatory (round-3 major).** `write_app_config` mutates: it
+creates a backup and calls `os.replace` immediately, and it assigns API key and
+model fields. It therefore **cannot** be used to stage a dependent update —
+doing so would write files during staging and would change more than
+`ai.api_base`. A new pure function is required:
+
+```
+render_app_config(meta, doc, mutate) -> bytes
+```
+
+It loads the YAML round-trip document, applies only the supplied mutation (for
+D7, exactly `ai.api_base`), and returns rendered bytes **without touching the
+filesystem**. `write_app_config` reuses the same internal rendering step so the
+two cannot drift; its existing observable behaviour for current callers is
+unchanged.
+
+The transaction is:
 
 ```
 Transaction
-  .prepare(paths: list[Path])            # acquire locks, hash-verify all
-  .backups()                             # exclusive-create all backups
-  .replace_all(staged: dict[Path, bytes])
+  .prepare(paths: list[Path], expected: dict[Path, bytes])  # locks + hash verify
+  .backups()                                               # exclusive-create all
+  .stage(rendered: dict[Path, bytes])                      # temp files only
+  .replace_all()
   .rollback(report: TransactionReport)
 ```
 
 1. **prepare.** Sort paths lexicographically (deterministic lock order, no
-deadlock). Take every `<config>.lock` flock, then re-read and hash-verify every
+   deadlock). Take every `<config>.lock` flock, then re-read and hash-verify every
    file under those locks. Any mismatch → release all locks, raise, write
    nothing.
 2. **backups.** Create all backups exclusively. Any failure → release locks,
    write nothing (no target has been touched).
-3. **stage.** Render every file to memory, validate every rendered result, write
-   every temp file and `fsync` it. No target replaced yet. Any failure → remove
-   temp files, release locks, write nothing.
+3. **stage.** Every file is rendered by the pure renderer, validated, written to
+   a temp file and `fsync`ed. **No target is replaced.** A test asserts that on
+   staging failure every target is byte-identical to its pre-transaction state.
 4. **replace_all.** Replace targets in the sorted order recorded in step 1.
 5. **Failure during replace_all.** Restore already-replaced targets from their
    backups, in reverse order, then release locks. If a **restore** also fails,
@@ -392,6 +457,14 @@ deadlock). Take every `<config>.lock` flock, then re-read and hash-verify every
 
 Zero dependents (`n == 0`) is still a transaction of one file, using the same
 code path.
+
+**UI reconciliation after a dependent rewrite.** A dependent app may hold
+unsaved edits in its own view. Rewriting its `ai.api_base` on disk must not
+silently clear those edits. The rule: the transaction updates the on-disk file
+and the dependent view's *saved baseline*; the view's draft is left untouched,
+so it remains marked dirty and the user's unrelated edits survive. If the
+dependent's draft is not dirty, the view reloads and reflects the new
+`api_base`. A test covers both branches.
 
 ### Symlinks and read-only files
 
@@ -411,15 +484,23 @@ Revision 2's Goal 4 promised the system would never write a configuration that
 bricks a restart. That is unachievable and contradicted the accepted degraded
 path. The contract is now stated precisely:
 
-**What validation guarantees:** the file parses under the service's own loader,
-satisfies the enforced schema rules, and — when the service validator is
-available — is accepted by the service's configuration checks.
+**What validation guarantees:** the file parses under ai-manager's own schema
+rules; and, **when the service validator actually runs**, that it additionally
+parses under the service's own loader and passes the service's configuration
+checks (including chat2api's `validate_auth()`, which blocks when the named auth
+environment variable is unset).
 
-**What validation does not guarantee:** that a restart succeeds. Specifically it
-does not check whether the configured port is already in use, whether the
-service's dependencies are installed, whether login or discovery will succeed at
-runtime, or whether the environment provides required secrets. A save can
-succeed and a restart can still fail.
+**What validation does not guarantee:** that a restart succeeds. It does not
+check whether the configured port is already in use, whether the service's
+dependencies are installed, whether provider credentials are present or valid,
+whether login or discovery will succeed at runtime, or whether the environment
+at restart time matches the environment at save time. A save can succeed and a
+restart can still fail.
+
+Note the asymmetry: authentication-variable availability **is** checked whenever
+the validator runs, because a missing auth var is a configuration fault that the
+service itself rejects at startup. Provider credentials and runtime outcomes are
+outside the guarantee in all cases.
 
 The UI reflects this by labelling the two outcomes distinctly: *"configuration
 valid"* versus *"service restart succeeded"*. The restart outcome is reported by
@@ -612,6 +693,7 @@ Verified by grep against the current suite. Every file below touches one of
 | `tests/test_yaml_manager.py` | exercises `read_app_config`/`write_app_config`; must confirm the new optional `expected_sha256` does not change existing behaviour |
 | `tests/test_main_window.py` | assumes three views and `AppDetailView` typing |
 | `tests/test_main_window_tray.py` | constructs `MainWindow`, therefore indirectly three views |
+| `tests/test_model_fetcher.py` | constructs `ModelFetchRequest` at three sites (lines 23, 51, 65) without `app_id`; affected by the new request-identity field |
 | `tests/conftest.py` | needs chat2api/file-bridge fixtures and a five-app workspace fixture |
 
 ### New tests
@@ -640,11 +722,13 @@ chat2api's declared stack (`pytest`, `pytest-asyncio`, `asyncio_mode=auto`) cove
 its launcher test, which uses `subprocess` plus socket polling and needs no new
 dependencies.
 
-file-bridge declares only Ruff and mypy configuration and has **no pytest
-harness**. Its validator is therefore tested through ai-manager's
+file-bridge **does** have a pytest harness (`pytest==9.1.1` in
+`requirements-dev.txt`, `tests/test_main.py`, `tests/conftest.py`); revision 3
+wrongly claimed otherwise. It is still **not** a delivery target: its existing
+tests are not modified and no new file-bridge test dependency is added. Its
+configuration validator is exercised through ai-manager's
 `test_validator_orchestration.py` using (a) a fake interpreter for deterministic
-exit codes and (b) an optional real-venv probe. No new file-bridge test
-dependency is added, and no file-bridge source is modified.
+`exit` codes and (b) an optional real-venv probe.
 
 No test above depends on optional manual probing; the post-restart listener
 assertion is automated in Target B.
