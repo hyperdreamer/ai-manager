@@ -1,0 +1,278 @@
+# PM execution manifest for the chat2api/file-bridge plan (epoch 1).
+# Derived by the PM from the validated source plan; never hand-edited.
+source_plan:
+  path: docs/superpowers/plans/2026-10-17-chat2api-file-bridge.md
+  sha256: dd6ec1010a7c47c52ec29c38df975cfd6a33e6c3a6b63624357a70744c81f9f4
+  commit_oid: 13778caa62b96b5fe8a793824a80eaa2ed00b139
+topic_slug: chat2api-file-bridge
+epoch: 1
+repositories:
+  ai-manager: /data/home/guest/Development/ai/ai-manager
+  chat2api: /data/home/guest/Development/ai/chat2api
+lanes:
+  - id: foundation
+    owns: ["src/ai_manager/config/app_registry.py", "src/ai_manager/config/config_errors.py", "src/ai_manager/config/models.py", "src/ai_manager/config/yaml_manager.py", "src/ai_manager/ui/app_detail_view.py", "tests/conftest.py", "tests/test_app_registry.py", "tests/test_e2e_integration.py", "tests/test_model_fetcher.py", "tests/test_models.py"]
+    task_ids: [T-001]
+  - id: model
+    owns: ["src/ai_manager/config/structured_config.py", "src/ai_manager/config/structured_models.py", "src/ai_manager/config/structured_schema.py", "tests/test_structured_config.py", "tests/test_structured_validation.py"]
+    task_ids: [T-002, T-005]
+  - id: io
+    owns: ["src/ai_manager/config/transaction.py", "tests/test_transaction.py"]
+    task_ids: [T-003, T-004]
+  - id: jobs
+    owns: ["src/ai_manager/config/structured_config.py", "src/ai_manager/services/app_interpreter.py", "src/ai_manager/services/config_jobs.py", "src/ai_manager/services/launcher_gate.py", "src/ai_manager/services/service_validation.py", "tests/test_blast_radius.py", "tests/test_launcher_gate.py", "tests/test_structured_config.py", "tests/test_validator_orchestration.py"]
+    task_ids: [T-006, T-007, T-009]
+  - id: dependents
+    owns: ["src/ai_manager/config/blast_radius.py", "src/ai_manager/config/yaml_manager.py", "tests/test_blast_radius.py", "tests/test_yaml_manager.py"]
+    task_ids: [T-008]
+  - id: editor
+    owns: ["src/ai_manager/ui/app_detail_view.py", "src/ai_manager/ui/config_dialogs.py", "src/ai_manager/ui/structured_config_view.py", "src/ai_manager/ui/structured_editor_model.py", "tests/test_structured_editor_model.py", "tests/test_structured_view.py"]
+    task_ids: [T-010, T-011]
+  - id: shell
+    owns: ["README.md", "src/ai_manager/config/presets.py", "src/ai_manager/ui/app_sidebar.py", "src/ai_manager/ui/main_window.py", "tests/test_app_views.py", "tests/test_e2e_integration.py", "tests/test_main_window.py", "tests/test_main_window_tray.py", "tests/test_mnemonic.py", "tests/test_structured_main_window.py", "tests/test_supervisor.py"]
+    task_ids: [T-012]
+  - id: launcher-b
+    owns: ["start.sh", "tests/test_launcher.py"]
+    task_ids: [T-013]
+  - id: acceptance
+    owns: ["README.md", "tests/test_launcher_gate_integration.py"]
+    task_ids: [T-014]
+tasks:
+  - id: T-001
+    plan_task: 1
+    title: "Register five configuration kinds and protect legacy dispatch"
+    tier: advanced
+    repository: ai-manager
+    lane: foundation
+    sequence: 1
+    depends_on: []
+    owns: ["src/ai_manager/config/app_registry.py", "src/ai_manager/config/config_errors.py", "src/ai_manager/config/models.py", "src/ai_manager/config/yaml_manager.py", "src/ai_manager/ui/app_detail_view.py", "tests/conftest.py", "tests/test_app_registry.py", "tests/test_e2e_integration.py", "tests/test_model_fetcher.py", "tests/test_models.py"]
+    resources: []
+    produces: [IF-001]
+    consumes: []
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
+  - id: T-002
+    plan_task: 2
+    title: "Load and render addressed structured documents without writes"
+    tier: advanced
+    repository: ai-manager
+    lane: model
+    sequence: 1
+    depends_on: [T-001]
+    owns: ["src/ai_manager/config/structured_config.py", "src/ai_manager/config/structured_models.py", "src/ai_manager/config/structured_schema.py", "tests/test_structured_config.py"]
+    resources: []
+    produces: [IF-002]
+    consumes: [IF-001]
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
+  - id: T-003
+    plan_task: 3
+    title: "Lock snapshots, refuse stale writes and create exclusive backups"
+    tier: advanced
+    repository: ai-manager
+    lane: io
+    sequence: 1
+    depends_on: [T-002]
+    owns: ["src/ai_manager/config/transaction.py", "tests/test_transaction.py"]
+    resources: []
+    produces: [IF-003]
+    consumes: [IF-002]
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
+  - id: T-004
+    plan_task: 4
+    title: "Stage sealed bytes and recover handled replacement failures"
+    tier: advanced
+    repository: ai-manager
+    lane: io
+    sequence: 2
+    depends_on: [T-003, T-002]
+    owns: ["src/ai_manager/config/transaction.py", "tests/test_transaction.py"]
+    resources: []
+    produces: [IF-004]
+    consumes: [IF-003, IF-002]
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
+  - id: T-005
+    plan_task: 5
+    title: "Validate only written scalars and enforce both service schemas"
+    tier: standard
+    repository: ai-manager
+    lane: model
+    sequence: 2
+    depends_on: [T-002, T-001]
+    owns: ["src/ai_manager/config/structured_schema.py", "tests/test_structured_validation.py"]
+    resources: []
+    produces: [IF-005]
+    consumes: [IF-002, IF-001]
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
+  - id: T-006
+    plan_task: 6
+    title: "Resolve the launch interpreter and execute bounded service validation"
+    tier: advanced
+    repository: ai-manager
+    lane: jobs
+    sequence: 1
+    depends_on: [T-002, T-001]
+    owns: ["src/ai_manager/services/app_interpreter.py", "src/ai_manager/services/service_validation.py", "tests/test_validator_orchestration.py"]
+    resources: []
+    produces: [IF-006]
+    consumes: [IF-002, IF-001]
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
+  - id: T-007
+    plan_task: 7
+    title: "Prove launcher behavior and provide the probe worker"
+    tier: advanced
+    repository: ai-manager
+    lane: jobs
+    sequence: 2
+    depends_on: [T-006, T-002, T-001]
+    owns: ["src/ai_manager/services/config_jobs.py", "src/ai_manager/services/launcher_gate.py", "tests/test_launcher_gate.py"]
+    resources: []
+    produces: [IF-007]
+    consumes: [IF-006, IF-002, IF-001]
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
+  - id: T-008
+    plan_task: 8
+    title: "Render dependent YAML purely and detect exact listener matches"
+    tier: advanced
+    repository: ai-manager
+    lane: dependents
+    sequence: 1
+    depends_on: [T-001, T-002]
+    owns: ["src/ai_manager/config/blast_radius.py", "src/ai_manager/config/yaml_manager.py", "tests/test_blast_radius.py", "tests/test_yaml_manager.py"]
+    resources: []
+    produces: [IF-008]
+    consumes: [IF-001, IF-002]
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
+  - id: T-009
+    plan_task: 9
+    title: "Coordinate validation and commit, then expose the save worker"
+    tier: advanced
+    repository: ai-manager
+    lane: jobs
+    sequence: 3
+    depends_on: [T-002, T-005, T-006, T-007, T-008, T-004]
+    owns: ["src/ai_manager/config/structured_config.py", "src/ai_manager/services/config_jobs.py", "tests/test_blast_radius.py", "tests/test_structured_config.py", "tests/test_validator_orchestration.py"]
+    resources: []
+    produces: [IF-009]
+    consumes: [IF-002, IF-005, IF-006, IF-007, IF-008, IF-004]
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
+  - id: T-010
+    plan_task: 10
+    title: "Keep structured row and mutation state in one pure editor model"
+    tier: advanced
+    repository: ai-manager
+    lane: editor
+    sequence: 1
+    depends_on: [T-002]
+    owns: ["src/ai_manager/ui/structured_editor_model.py", "tests/test_structured_editor_model.py"]
+    resources: []
+    produces: [IF-010]
+    consumes: [IF-002]
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
+  - id: T-011
+    plan_task: 11
+    title: "Build declarative structured views and concrete review dialogs"
+    tier: advanced
+    repository: ai-manager
+    lane: editor
+    sequence: 2
+    depends_on: [T-010, T-002, T-001]
+    owns: ["src/ai_manager/ui/app_detail_view.py", "src/ai_manager/ui/config_dialogs.py", "src/ai_manager/ui/structured_config_view.py", "tests/test_structured_view.py"]
+    resources: []
+    produces: [IF-011]
+    consumes: [IF-010, IF-002, IF-001]
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
+  - id: T-012
+    plan_task: 12
+    title: "Coordinate five views, queued jobs, reconciliation and restart outcomes"
+    tier: advanced
+    repository: ai-manager
+    lane: shell
+    sequence: 1
+    depends_on: [T-011, T-009, T-007, T-001, T-005]
+    owns: ["README.md", "src/ai_manager/config/presets.py", "src/ai_manager/ui/app_sidebar.py", "src/ai_manager/ui/main_window.py", "tests/test_app_views.py", "tests/test_e2e_integration.py", "tests/test_main_window.py", "tests/test_main_window_tray.py", "tests/test_mnemonic.py", "tests/test_structured_main_window.py", "tests/test_supervisor.py"]
+    resources: []
+    produces: [IF-012]
+    consumes: [IF-011, IF-009, IF-007, IF-001, IF-005]
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
+  - id: T-013
+    plan_task: 13
+    title: "Fix and behaviorally verify the Target B launcher in its own checkout"
+    tier: advanced
+    repository: chat2api
+    lane: launcher-b
+    sequence: 1
+    depends_on: []
+    owns: ["start.sh", "tests/test_launcher.py"]
+    resources: []
+    produces: [IF-013]
+    consumes: []
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/test_launcher.py", "-q"]
+        cwd: "."
+        env: {}
+        timeout_seconds: 600
+  - id: T-014
+    plan_task: 14
+    title: "Verify the real cross-target gate and close the acceptance record"
+    tier: advanced
+    repository: ai-manager
+    lane: acceptance
+    sequence: 1
+    depends_on: [T-012, T-013]
+    owns: ["README.md", "tests/test_launcher_gate_integration.py"]
+    resources: []
+    produces: [IF-014]
+    consumes: [IF-012, IF-013]
+    validation:
+      - argv: ["python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {PYTHONPATH: "src"}
+        timeout_seconds: 900
