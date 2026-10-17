@@ -1,14 +1,37 @@
-# chat2api and file-bridge Management — Design
+# chat2api and file-bridge Management — Design (revision 2)
 
 **Date:** 2026-10-17
-**Status:** Approved
-**Target:** ai-manager 0.1.2 → 0.2.0
+**Status:** Revised after frontier design review
+**Supersedes:** revision 1 of this document
+**Delivery targets:** two repositories (see §1)
+
+## Revision 2 Summary
+
+Revision 1 was reviewed by a frontier auditor. Three blockers and nine major
+findings were raised; every one was independently verified against source before
+being accepted. The resulting pivots:
+
+- **Pivot A (blocker §3.1).** `chat2api/start.sh` does **not** pass `server.host`
+  or `server.port` to uvicorn, so editing them in revision 1 would have been
+  inert. The feature now also fixes the chat2api launcher, which makes the run
+  span two repositories.
+- **Pivot B (blocker §3.2).** chat2api startup also calls `validate_auth()`, so
+  the validator contract now includes it and explicitly classifies
+  login/discovery failures as runtime, not configuration, faults.
+- **Pivot C (blocker §3.3).** The revision 1 concurrency guarantee was
+  overstated. The commit protocol now uses an advisory lock and the guarantee is
+  stated honestly as "no lost update observed before commit".
+- **Correction.** Revision 1 claimed chat2api's JSON round-trip preserves
+  comments. JSON has no comments; revision 1 was wrong, and the fidelity
+  contract is now stated semantically.
+- Deferred-feature and scope decisions from the user are unchanged: credentials
+  editable and masked, detect-and-refuse, in-process plus best-effort service
+  validation, grouped layout with a models table and on-demand diff, and
+  change-time blast-radius warning.
 
 ## Background
 
-`ai-backends` already supervises five services: `ai-grammar`, `textkit`,
-`yt2txt`, `chat2api`, and `file-bridge`. Live output confirms all five report
-`running` with pids and log paths:
+`ai-backends` supervises five services. Live `ai-backends status` output:
 
 ```
 ai-grammar   running  pid=2221916 log=~/.cache/ai-backends/logs/ai-grammar.log
@@ -18,295 +41,410 @@ chat2api     running  pid=2221919 log=.../chat2api.log
 file-bridge  running  pid=2221921 log=.../file-bridge.log
 ```
 
-ai-manager, however, registers only the first three. `chat2api` and `file-bridge`
-are explicitly excluded in `config/app_registry.py`, in the README, and in
-`tests/test_app_registry.py`. The exclusion was a deliberate early decision
-("`file-bridge` is a local file bridge", "`free-tts` does not rely on an LLM")
-that this feature inverts for the two bridge services.
+ai-manager registers only the first three. `file-bridge` is **explicitly**
+excluded in `config/app_registry.py`, the README, and `tests/test_app_registry.py`.
+`chat2api` is **not** explicitly excluded anywhere — it was simply never
+registered, despite ai-manager shipping a `chat2api_local` provider preset that
+points the three LLM apps at `http://127.0.0.1:8000`. Revision 1 overstated this
+as a symmetric exclusion; that is corrected here.
 
-The inversion is not cosmetic. Both services differ structurally from the three
-LLM apps:
+The two services differ structurally from the LLM apps:
 
 | | ai-grammar / textkit / yt2txt | chat2api | file-bridge |
 | --- | --- | --- | --- |
-| Config format | YAML (`config.yaml`) | JSON (`config.json`) | YAML (`config.yaml`) |
-| Shape | fixed `ai:` block | `server` block + dynamic `models` map | three flat scalars |
-| Secrets | `api_key` (one field) | per-model `options.account` / `options.password` | none |
-| Loads config | at startup | at startup (lifespan) | at startup, before bind |
-| Own validator | none | none useful (see below) | strict, reject-on-invalid |
+| Config format | YAML `config.yaml` | JSON `config.json` | YAML `config.yaml` |
+| Shape | fixed `ai:` block | `server` + dynamic `models` map | three flat scalars |
+| Secrets | one `api_key` | per-model `options.account` / `password` | none |
+| Config read | at startup | at startup (lifespan) | at startup, before bind |
+| Honors config port | n/a | **no** (defect, fixed by this feature) | **yes** (`main.py:1063`) |
+| Own validator | none | weak (`load_config`); `Registry` + `validate_auth` add checks | strict, reject-on-invalid |
 
 ## Goals
 
-1. Register `chat2api` and `file-bridge` as fully first-class managed apps:
-   sidebar entry, status dot, port, restart action, live logs, dirty tracking.
-2. Give each a typed configuration editor for its own file format, without
-   pretending either has an OpenAI `ai:` block.
+1. Register `chat2api` and `file-bridge` as first-class managed apps: sidebar
+   entry, status, effective port, restart, live logs, dirty tracking.
+2. Give each a typed configuration editor for its own file format.
 3. Edit chat2api credentials in place with masked fields and reveal toggles,
    preserving every value the user does not touch.
-4. Never lose a concurrent hand edit, and never write a config that will brick
-   a restart.
-5. Warn at the moment a chat2api host/port change would orphan the three LLM
-   apps that point at it.
-6. Correct the documentation that currently claims these apps are excluded.
+4. Never lose a concurrent hand edit that was observable before commit, and
+   never write a configuration that will brick a restart.
+5. Warn when a chat2api host/port change would orphan the three LLM apps.
+6. Make chat2api's configured host/port actually control its listener, so that
+   the editor's fields are truthful.
+7. Correct the documentation that misdescribes the registry.
 
 ## Non-Goals
 
-- Migrating chat2api secrets to env-var references. Deferred by explicit user
-  decision; the editor hides nothing and claims nothing it cannot deliver.
+- Migrating chat2api credentials to env-var references. Deferred by user
+  decision; recorded as follow-up work.
 - Live `/v1/models` drift polling. Dropped: chat2api reads config only at
-  startup, so post-save "drift" is expected noise.
-- `free-tts` management. It has no configuration surface and is not an LLM.
-- Any change to chat2api or file-bridge source code. Both are edited only
-  through their config files.
+  startup, so post-save drift is expected noise.
+- `free-tts` management.
+- Changing chat2api provider behaviour, request handling, or model discovery.
+  The only chat2api source change is the launcher (see §1).
 
 ## Decisions
-
-Each decision was made explicitly during design and is binding.
 
 | # | Question | Decision |
 | --- | --- | --- |
 | D1 | Scope | Supervision + logs + bespoke editors + full first-class status |
-| D2 | chat2api credentials | Masked, editable fields with reveal toggles |
-| D3 | Editor architecture | Declarative field schema rendered by one generic form |
-| D4 | Concurrent edits | Detect via content hash and **refuse** the save |
+| D2 | chat2api credentials | Masked, editable, reveal toggles |
+| D3 | Editor architecture | Declarative per-kind schema + one generic form |
+| D4 | Concurrent edits | Detect and **refuse**; advisory lock; honest guarantee |
 | D5 | Validation timing | In-process rules always; service validator best-effort |
-| D6 | Layout | Single grouped page, table for models, diff on demand |
-| D7 | Blast radius | Change-time warning plus opt-in rewrite of dependent `api_base` |
+| D6 | Layout | Single grouped page, models table, diff on demand |
+| D7 | Blast radius | Change-time warning + opt-in rewrite of dependent `api_base` |
+| D8 | Inert chat2api port | **Fix `chat2api/start.sh`** so config drives the listener |
+| D9 | Two-repo delivery | One PM run, two delivery targets, repo-scoped lanes |
 
-## Verified Facts About the Services
+## 1. Two delivery targets
 
-These were established by running the real loaders, not by reading docs, and
-they directly determine the validation design.
+| | Target A | Target B |
+| --- | --- | --- |
+| Repository | `ai-manager` | `chat2api` |
+| Path | `/data/home/guest/Development/ai/ai-manager` | `/data/home/guest/Development/ai/chat2api` |
+| Branch at pin | `main` @ `b220669` | `main` @ `c40e3c6` |
+| Integration worktree | `$PM_WORKTREE_ROOT/integration` | `$PM_WORKTREE_ROOT/integration-chat2api` |
+| Integration branch | `pm/chat2api-file-bridge/run-<id>` | same name, distinct repo |
+| Remote | `origin` → `hyperdreamer/ai-manager` | `origin` → `hyperdreamer/chat2api` |
 
-**file-bridge's validator is strict and usable standalone:**
+Both repositories were clean, on a named branch, tracking `origin/main`, with a
+single registered worktree at pin time. Their `main` tips equal their fetched
+remote tips, so no reconciliation is required at delivery.
 
+The delivery gate at the end presents **both** targets. Neither is merged
+without an explicit per-target decision. A target may be delivered by merge, by
+pull request, or left undelivered; the pair is still coherent because Target B's
+launcher change is backwards compatible (see §5).
+
+### Target B change: `chat2api/start.sh`
+
+Currently:
+
+```bash
+exec python -m uvicorn app.main:app \
+    --timeout-graceful-shutdown 5 \
+    --log-level info \
+    "$@"
 ```
-save_root: "/nonexistent/xyz"  -> RuntimeError: save_root does not exist
-unknown key `bogus_key`        -> RuntimeError: Unknown config key(s): bogus_key
-duplicate key `port`           -> RuntimeError: Invalid YAML ... duplicate
-port: 70000                    -> RuntimeError: config port must be from 1 to 65535
-valid config                   -> VALID
-```
 
-**chat2api's `load_config()` accepts almost anything:**
+The comment above it claims host and port come from `config.json`. They do not.
 
-```
-port 70000              -> ACCEPTED
-unknown top-level key   -> ACCEPTED
-unknown server key      -> ACCEPTED
-unknown provider kind   -> ACCEPTED
-port as string "8000"   -> ACCEPTED (silently coerced to default 8000)
-```
+Required behaviour:
 
-Only `Registry(config)` rejects a bad provider kind:
+1. Resolve the config path exactly as the service does: `$CHAT2API_CONFIG` if
+   set, else `config.json` in the script directory.
+2. Read `server.host` and `server.port` with the service's own loader so
+   defaults and validation are identical — not a second parser that can drift.
+3. Pass them as `--host` and `--port`, **before** `"$@"` so an explicit
+   user-supplied flag still wins.
+4. If the config cannot be read, fail loudly with a non-zero exit rather than
+   silently binding a default. The service already refuses to start with a
+   broken config; the launcher must not mask that by starting on a stale port.
+5. Preserve all existing behaviour: virtualenv activation, the version banner,
+   `--timeout-graceful-shutdown 5`, `--log-level info`, extra argument pass-through.
 
-```
-Registry(load_config(p)) with provider "nope"
-  -> ValueError: Model 'x' references unknown provider 'nope'.
-     Known providers: ['browser', 'copilot_webapi', 'echo', 'gemini_webapi']
-```
+This is backwards compatible: with the default `127.0.0.1:8000` the effective
+listener is unchanged, so Target B can be delivered before, after, or with
+Target A without breaking the running service.
 
-**Consequence:** for chat2api, ai-manager is the only thing that will catch a
-bad port, and the service validator only meaningfully covers provider kinds.
+## 2. Registry boundary
 
-Both validators can be invoked against a *candidate* temp file before commit,
-using each service's own interpreter, which is what makes D5 work.
+`AppMetadata` gains a `config_kind` discriminator with three known values:
+`"llm"`, `"chat2api"`, `"file-bridge"`. Any other value **fails closed** with a
+clear error rather than falling back to a default.
 
-## Architecture
+`get_managed_apps()` returns all five apps. `free-tts` remains excluded and is
+the only app named in the corrected docstrings and README.
 
-### Registry boundary
+Kind dispatch is exhaustive across the config surface, not just reads:
 
-`AppMetadata` gains a `config_kind` discriminator:
+| Operation | `llm` | `chat2api` | `file-bridge` | Unknown kind |
+| --- | --- | --- | --- | --- |
+| load | `read_app_config` | `structured.load` | `structured.load` | raise |
+| render | `write_app_config` | `structured.render` | `structured.render` | raise |
+| missing file | auto-create from example (existing behaviour, unchanged) | empty sections + explicit "create from example" action | empty sections + explicit action | raise |
+| validation | none (unchanged) | §4 stage 2 + 3 | §4 stage 2 + 3 | raise |
+| commit | `write_app_config` | `structured.commit` | `structured.commit` | raise |
 
-- `"llm"` — `ai-grammar`, `textkit`, `yt2txt`; existing `ai:`-block handling.
-- `"chat2api"` — `config.json`; `server` block + `models` routing table.
-- `"file-bridge"` — `config.yaml`; `save_root`, `max_text_bytes`, `port`.
+Auto-creation from an example is deliberately **retained for `llm` kinds**
+(it is existing, tested behaviour) and **not introduced for the new kinds**,
+because chat2api picks up `.env` secrets by name and file-bridge refuses to
+start without a valid `save_root`; silently materialising a config would hide
+that.
 
-`get_managed_apps()` returns all five. `free-tts` remains excluded, and the
-docstrings and README are corrected to say so.
+This distinction is load-bearing: `tests/test_e2e_integration.py` currently
+loops the entire registry through `read_app_config()`. That loop becomes
+kind-dispatched, and it must assert kind-specific facts so a silently defaulted
+`AppAIConfig` cannot make the test pass.
 
-`read_app_config()` is only valid for `config_kind == "llm"`. Every existing
-caller becomes kind-dispatched. This is load-bearing: `tests/test_e2e_integration.py`
-currently loops the entire registry through `read_app_config()`, which would
-mis-parse `config.json` as YAML as soon as chat2api is registered.
+## 3. Config access layer
 
-### Config access layer
-
-New module `src/ai_manager/config/structured_config.py` with a small interface:
+New module `src/ai_manager/config/structured_config.py`:
 
 ```
 load(kind, path) -> StructuredDoc
-    doc          parsed structure (dict-like, order preserving)
-    raw_sha256   sha256 of the exact bytes read
-    existed      whether the file existed
+    kind            "chat2api" | "file-bridge"
+    doc             parsed structure (order preserving)
+    raw_sha256      sha256 of the exact bytes read
+    existed         bool
+    resolved_path   real path used for the candidate-adjacency rule (§4)
 
 render(kind, doc) -> bytes
-    JSON for chat2api, ruamel round-trip YAML for file-bridge
-
 commit(kind, path, doc, expected_sha256) -> SaveResult
-    re-read, verify sha256, backup, atomic replace
 ```
 
-- **Round-trip fidelity.** Only addressed key paths are mutated. Untouched keys,
-  comments, key order, and quoting survive. file-bridge uses the same ruamel
-  engine configuration as `yaml_manager._get_yaml_engine()`.
-- **Backups.** `config.json.<utc-ts>.bak` and `config.yaml.<utc-ts>.bak`,
-  written *before* the replace. Timestamped rather than a single `.bak` so
-  successive saves cannot clobber each other's recovery point.
-- **Atomic replace.** Temp file in the same directory, `fsync`, preserve the
-  original file mode, `os.replace`, then `fsync` the parent directory. This
-  mirrors `yaml_manager.write_app_config`, extended with the directory sync.
-- **Refusal (D4).** `commit` re-reads the file and compares sha256 against the
-  value captured at load. Mismatch raises `StaleDocumentError` and writes
-  nothing. Force overwrite is a separate explicit call that re-loads and
-  re-applies the draft; it is the only path past the check.
+### Fidelity contract
 
-### Validation pipeline
+Stated semantically, because byte-level preservation is not achievable for both
+formats:
 
-Save runs these stages in order and stops at the first failure:
+- **JSON (chat2api):** JSON has no comments. The service's example file carries a
+  `_comments` **data** object, which is preserved like any other key. The
+  contract is: every key not addressed by the edit is preserved with identical
+  value, at its original position in key order; formatting is normalised to
+  2-space indent with a trailing newline, matching the existing files. Untouched
+  keys are compared by parsed equality, not by bytes, in tests.
+- **YAML (file-bridge):** ruamel round-trip using the same engine configuration
+  as `yaml_manager._get_yaml_engine()`. Comments, quoting of touched scalars'
+  untouched neighbours, and key order are preserved. Anchors and aliases are
+  preserved as written; the editor does not resolve or expand them, and any
+  document containing an anchor/alias **is rendered read-only** with an
+  explanatory note, because rewriting an aliased node could silently change a
+  second location.
+- Non-dict roots: chat2api's loader converts a non-object root to `{}`. The
+  editor must **not** silently do that. A non-object root is a load error shown
+  to the user, and save is disabled until the file is fixed externally.
+- `models` that is not a dict, or a model entry without `options`, is likewise a
+  load error, not a silent coercion.
 
-1. **Control-character rejection.** Refuse any value containing `\n`, `\r`, or
-   NUL before any file work.
-2. **In-process rules** (pydantic models per kind):
-   - chat2api: `host` non-empty and parseable; `port` in 1–65535; each model
-     name non-empty and unique; `provider` in the known set; `auth_token_env`
-     either absent or a non-empty env-var-shaped name.
-   - file-bridge: `port` in 1–65535; `max_text_bytes` a non-negative integer;
-     `save_root` non-empty, existing, and a writable directory.
-3. **Service validator, best effort.** Rendered candidate written to a temp
-   file outside the configured path, then:
-   - file-bridge: `python -c "import main; c=main.load_config(p); main._probe_save_root(c.save_root)"`
-   - chat2api: `python -c "from app.config import load_config; from app.registry import Registry; Registry(load_config(p))"`
+### Concurrency (D4) — honest guarantee
 
-   Executed with the app's own `.venv/bin/python`, 10 s timeout, cwd set to the
-   app directory. If the interpreter or module is unavailable the stage is
-   skipped and the UI shows **"validated by ai-manager only — service validator
-   unavailable"**. A genuine validator rejection blocks the save and shows the
-   exact stderr.
-4. **Commit** with the sha256 check from D4.
+Revision 1 promised that a concurrent hand edit could never be lost. That is not
+achievable with check-then-replace. The real protocol:
 
-Stage 2 exists because chat2api's stage 3 cannot catch a bad port.
+1. Acquire an **advisory `flock`** on the config file for the whole
+   verify-backup-replace window. This coordinates with other ai-manager
+   instances and with any tool that cooperates; it cannot stop an editor that
+   ignores locks.
+2. Re-read, compare sha256 to the value captured at load. Mismatch →
+   `StaleDocumentError`, nothing written.
+3. Write backup, `fsync`, atomically replace, `fsync` parent directory.
+4. Release the lock.
 
-### Blast radius (D7)
+**Guarantee:** no update observed before the hash check is lost, and the window
+is narrowed to the interval between the check and the `os.replace`. **Not**
+guaranteed: protection against a writer that performs no locking and writes
+inside that interval. This limitation is documented in the specification rather
+than papered over.
 
-Before committing a changed chat2api `server.host` or `server.port`, build the
-old and new base URLs and compare each against `ai.api_base` in the three LLM
-configs. On any match, present a pre-save dialog listing the affected apps with
-a checkbox each:
+### Multi-file writes (D7)
 
-> 3 apps point at `http://127.0.0.1:8000`. Update them to
-> `http://127.0.0.1:8100` too?
+The blast-radius update touches four files. Ordering:
 
-Accepting rewrites only `ai.api_base`, through the existing
-`write_app_config`. Declining saves chat2api's file alone. The dialog appears
-before any write and is skipped entirely when host and port are unchanged.
+1. Load and hash-verify **all** candidates first (chat2api plus each selected
+   dependent). Any mismatch aborts everything before a single write.
+2. Create all backups.
+3. Replace chat2api's file, then each dependent in turn.
+4. On a failure mid-sequence, restore already-replaced files from their backups
+   and report exactly which files were written and which were restored.
 
-### UI
+Dependents are written through `write_app_config`, which gains an optional
+`expected_sha256` argument so the same refusal rule applies to them. Without
+that argument its current behaviour is unchanged for existing callers.
 
-`AppDetailView` remains the view for `config_kind == "llm"`. A new
-`StructuredConfigView` serves the other two kinds. Both expose the same view
-interface used by `MainWindow` — `load_config`, `get_current_draft`,
-`update_service_status`, `set_dirty`, `log_view` — so `MainWindow` routes by
-kind rather than special-casing app IDs.
+### Symlinks and read-only files
 
-Layout for both new apps (approved mockup option 4):
+- A config path that is a symlink is **rejected at load** with an explicit
+  message, because `os.replace` would replace the link itself rather than its
+  target and silently de-link the configuration. Detection uses `lstat()`.
+- A config that is not writable is reported as such; the editor renders
+  read-only with save disabled. It is never replaced "successfully" by virtue of
+  a writable parent directory.
+- Mode bits are preserved on replace; tests assert with `lstat()`.
+
+## 4. Validation pipeline
+
+Ordered, fail-fast:
+
+1. **Control-character rejection.** Applied to every *scalar value being
+   written*, not to every string in the document: reject `\n`, `\r`, `\0` in
+   host, model names, option values, `auth_token_env`, and `save_root`
+   components. Existing untouched values are never inspected, so a
+   pre-existing oddity cannot block an unrelated save. Unicode is permitted
+   everywhere, including paths.
+2. **In-process rules** (pydantic per kind), mirrored from the services' real
+   constraints rather than from prose:
+   - chat2api: `host` non-empty; `port` must be an `int` (bools and numeric
+     strings rejected) in 1–65535; model names non-empty and unique; `provider`
+     in `{echo, gemini_webapi, copilot_webapi, browser}`; `auth_token_env`
+     either absent, `null` (explicitly valid — disables auth), or an
+     env-var-shaped non-empty name.
+   - file-bridge: `port` must be an `int` in 1–65535; `max_text_bytes` must be
+     an `int` with `0 <= n <= 100 MiB` (the service's `MAX_MAX_TEXT_BYTES`);
+     `save_root` non-empty, expanding to an existing writable directory that is
+     **not** inside the file-bridge application directory (the service's
+     `_probe_save_root` rule).
+3. **Service validator, best effort.** The candidate file is written **into the
+   same directory as the target config** (a hidden sibling), because
+   file-bridge resolves a relative `save_root` against the config file's parent
+   — a candidate in `/tmp` would validate a different directory. Commands run
+   with the app's `.venv/bin/python`, cwd set to the app directory, 10 s
+   timeout:
+   - file-bridge: `import main; c = main.load_config(p); main._probe_save_root(c.save_root)`
+   - chat2api: `load_config(p)`; `Registry(cfg)`; `cfg.validate_auth()`
+
+   The chat2api stage is explicitly scoped: it validates **configuration**, not
+   runtime. `validate_auth()` fails when the named env var is unset, which is a
+   genuine config fault and blocks the save. `startup_login()` and
+   `ensure_discovered()` are **not** invoked: they perform network and browser
+   work whose failure does not indicate a bad config, and invoking them would
+   make an offline save fail for the wrong reason. This distinction is stated in
+   the UI text and the specification.
+4. **Commit** per §3.
+
+If the app's interpreter or module is unavailable, stage 3 is skipped and the UI
+shows *"validated by ai-manager only — service validator unavailable"*. That
+degraded path means goal 4 is best-effort, not absolute, and the specification
+says so.
+
+## 5. chat2api provider options contract
+
+`models[*].options` is a free-form mapping in the service. The editor must
+handle it without inventing precision:
+
+- **Known option keys** are declared per provider kind from the providers'
+  actual reads: `gemini_webapi` (`account`, `password`, `gemini_model`,
+  `secure_1psid_env`), `copilot_webapi` (`account`, `password`,
+  `access_token`, `access_token_env`, `copilot_mode`, `interactive_login`,
+  `browser_profile_dir`, `timezone`, `chat_timeout`), `browser` (`headless`,
+  `account`, `password`, `user_data_dir`, `timeout`, `upstream_model`,
+  `hydration_timeout_ms`, `response_appear_timeout`), `echo` (`prefix`).
+- **Unknown keys are preserved verbatim** and shown in a collapsed "raw
+  options" area, never dropped. The service tolerates them.
+- **Absent versus empty `options`** is preserved: an entry with no `options` key
+  stays without one unless the user edits it.
+- **Provider switch** keeps the option map intact and marks now-unknown keys as
+  raw; nothing is deleted implicitly. The UI flags that the previous provider's
+  options may be meaningless to the new one.
+- **Secrets** (`account`, `password`, `access_token`) render masked with
+  per-field reveal, and follow the unchanged-flag rule: unchanged secrets are
+  written from the loaded document, never from widget text.
+
+## 6. UI
+
+`AppDetailView` keeps serving `config_kind == "llm"`. A new
+`StructuredConfigView` serves the two new kinds. Both satisfy an explicit
+protocol, because the existing view does **not** already satisfy the informal one
+revision 1 described:
 
 ```
-app title + description            [● running pid=1234] [Restart Service]
+class ConfigView(Protocol):
+    log_view -> LogViewWidget
+    def load_config(self, doc) -> None
+    def current_draft(self) -> Any
+    def update_service_status(self, status: ServiceStatus) -> None
+    def on_model_fetch_response(self, response: ModelFetchResponse) -> None
+```
+
+`AppDetailView` emits `AppAIConfig` and has no `set_dirty` (MainWindow computes
+dirtiness itself), so the protocol carries `current_draft` rather than a
+`set_dirty` call, and dirty computation stays in `MainWindow` for both view
+types. Model fetching is LLM-only: on a structured view the fetch action is
+absent, and `on_model_fetch_response` is a no-op that cannot be reached because
+no request is issued. Fetch responses are additionally routed by the request's
+originating app id, which is added to `ModelFetchRequest`, replacing the current
+"whichever app is selected" routing.
+
+Layout (approved mockup option 4, chat2api variant shown):
+
+```
+title + description                 [● running pid=1234] [Restart Service]
 [Configuration] [Logs]
-  Editing  /path/to/config.json          validated by chat2api
-  ── Server ──────────────────────────────────────────────────────
-  Host [        ]   Port [    ]   Auth token env var [            ]
-  ── Models ──────────────────────────────────────────────────────
-  NAME              PROVIDER          OPTIONS           SECRETS
-  gemini            gemini_webapi     account, password •••••• [Reveal]  [Remove]
-  ▸ m365-copilot    copilot_webapi    account, password •••••• [Reveal]  [Remove]
-  browser-gemini    browser           headless          none              [Remove]
+  Editing  .../chat2api/config.json        validated by chat2api · ai-manager
+  ── Server ─────────────────────────────────────────────────────────
+  Host [        ]   Port [    ]   Auth token env var [               ]
+  ── Models ─────────────────────────────────────────────────────────
+  NAME              PROVIDER          OPTIONS            SECRETS
+  gemini            gemini_webapi     account, password  •••••• [Reveal] [Remove]
+  browser-gemini    browser           headless           none            [Remove]
   [+ Add model]
-  ────────────────────────────────────────────────────────────────
-  ● Unsaved changes        [Review Changes] [Save Config Only] [Save and Restart]
+  ─────────────────────────────────────────────────────────────────
+  ● Unsaved changes      [Review Changes] [Save Config Only] [Save and Restart]
 ```
 
-- **chat2api models** render as a table with inline row expansion. The expanded
-  row holds the provider dropdown (restricted to known kinds), typed option
-  fields derived from the selected provider, and masked secret fields with a
-  per-field Reveal toggle.
-- **Secret preservation (D2).** A masked field tracks an `unchanged` flag
-  separate from its displayed text. Fields marked unchanged are written back
-  from the loaded document, never from the widget. A masked field can therefore
-  never be accidentally committed as literal bullet characters.
-- **Review Changes (D6)** opens a modal showing the exact rendered bytes with
-  line-level `+`/`-` highlighting. It is the on-demand form of the preview that
-  option C would have kept permanently visible.
-- **file-bridge** renders three fields plus a `save_root` directory picker. The
-  `max_text_bytes: 0` case is annotated inline as *"no limit"*, because the
-  current config uses `0` and that is easy to misread as "reject everything".
-- Both views show the live-log tab by embedding the existing `LogViewWidget`,
-  unchanged.
+The mockup is **chat2api-specific**. `file-bridge` renders exactly three config
+fields — `save_root` (text field plus directory picker), `max_text_bytes`
+(integer field annotated *0 = no limit*), `port` (integer field) — under a single
+`Save Location & Server` group, with no host, auth, or models controls.
 
-### Error handling
+Sidebar: the port shown is the **effective configured port**, not
+`AppMetadata.default_port`. `AppSidebar` gains a configured-port update path,
+populated on load and updated after a successful save; the metadata default
+remains the initial value while a config is unloaded or unreadable.
+
+## 7. Blast radius (D7)
+
+Before committing a changed chat2api `server.host` or `server.port`, compare the
+old and new base URLs against `ai.api_base` in the three LLM configs. On a match,
+show a pre-save dialog listing affected apps with a per-app checkbox. Accepting
+rewrites only `ai.api_base` through `write_app_config` with hash checking.
+Declining saves chat2api alone. Host/port unchanged → dialog is not shown.
+
+This now describes real behaviour, because Target B makes the port effective.
+
+**Auth contract fix.** ai-manager's `chat2api_local` preset declares
+`CHAT2API_API_KEY`, while chat2api's default is `CHAT2API_TOKEN` and the live
+`.env` defines `CHAT2API_TOKEN` only. The preset is wrong and is corrected to
+`CHAT2API_TOKEN`. The design additionally warns when a dependent app's
+`ai.api_key` names an env var different from chat2api's `auth_token_env`,
+because that combination yields 401s that look like a server fault.
+
+## 8. Errors and failure modes
 
 | Condition | Behavior |
 | --- | --- |
-| File changed on disk since load | Save blocked; Reload / Show diff / Force overwrite |
+| File changed on disk before commit | Save blocked; Reload / Show diff / Force overwrite |
 | In-process rule fails | Save blocked; field marked invalid; inline message |
 | Service validator rejects | Save blocked; exact stderr in expandable panel |
 | Service validator unavailable | Save allowed with visible degraded notice |
-| Config file missing | Empty sections plus "create from example?" action; never auto-created |
+| Config missing (new kinds) | Empty sections + explicit create-from-example action |
+| Config missing (llm kinds) | Unchanged: auto-create from example |
+| Non-dict root / non-dict `models` | Load error; save disabled |
+| Anchors/aliases present in YAML | Read-only render with explanation |
+| Config path is a symlink | Load rejected with explanation |
+| Config not writable | Read-only render; save disabled |
 | Backup write fails | Save aborted before replace |
-| Restart fails after successful save | File remains saved; failure surfaced; no rollback |
-| Render produces invalid output | Abort before commit; treat as internal error |
+| Multi-file blast radius partially fails | Restore replaced files from backups; report exactly what happened |
+| Restart fails after save | File stays saved; failure surfaced; no rollback |
 
-## Testing Strategy
+## 9. Testing Strategy
 
-- **Unit — schema rules.** Port bounds (0, 65535, 65536, non-integer), empty
-  host, duplicate model names, unknown provider kind, non-existent `save_root`,
-  non-writable `save_root`, negative `max_text_bytes`.
-- **Unit — serialization.** Round-trip a config with comments, unusual key order
-  and quoting, assert untouched regions are byte-identical after `render`.
-- **Unit — secrets.** Load a doc, mark a secret field unchanged, mutate another
-  field, render, assert the secret bytes are preserved exactly and that no
-  bullet characters appear.
-- **Unit — refusal.** Change the file between `load` and `commit`, assert
-  `StaleDocumentError` and that the file on disk is unchanged.
-- **Unit — backups and modes.** Assert a timestamped backup exists with the
-  original content, and that the replaced file keeps the original mode.
-- **Unit — validator orchestration.** Stub `.venv/bin/python` with a script that
-  exits 0, exits 1 with stderr, or is absent; assert the three outcomes and the
-  degraded notice.
-- **Unit — blast radius.** Fixture workspace with three LLM configs pointing at
-  `:8000`; assert detection, opt-in rewrite touches only `ai.api_base`, and
-  declining leaves the three files byte-identical.
-- **UI (offscreen).** Both views construct, dirty tracking works, table
-  add/remove/expand behave, Review Changes shows the expected content, and the
-  Logs tab still binds.
-- **Registry.** Five apps registered with correct kinds, `free-tts` absent,
-  and the e2e integration test no longer feeds `config.json` to
-  `read_app_config`.
+New and changed tests, enumerated (reviewer finding 12):
 
-Real service validators are exercised manually against the live venvs and are
-documented in the specification as optional probes, not as required CI steps.
+| File | Change |
+| --- | --- |
+| `tests/test_app_registry.py` | five apps, kinds correct, `free-tts` absent; replaces the current "exactly three" assertion |
+| `tests/test_e2e_integration.py` | kind-dispatched loading; assert chat2api/file-bridge facts so a defaulted config cannot pass |
+| `tests/test_main_window.py` | constructs with five apps; view routing by kind |
+| `tests/test_mnemonic.py` | fixture app set extended, or asserted against the five-app registry |
+| `tests/conftest.py` | fixtures for chat2api/file-bridge configs |
+| `tests/test_structured_config.py` (new) | load/render/commit, fidelity, refusal, backups, modes, symlink |
+| `tests/test_structured_validation.py` (new) | per-kind rules incl. int-type strictness, 100 MiB bound, application-dir exclusion, `auth_token_env: null` |
+| `tests/test_blast_radius.py` (new) | detection, opt-in rewrite, decline path, partial-failure restore |
+| `tests/test_structured_view.py` (new) | offscreen UI: table add/remove/expand, secret unchanged-flag, Review Changes |
+| `tests/test_supervisor.py` | file-bridge status/restart fixture |
+| `tests/test_chat2api_launcher.py` (new, Target B) | launcher resolves host/port from config, honors `CHAT2API_CONFIG`, passes user args last, fails loudly on unreadable config |
 
-## Security Notes
+Target B tests run in the chat2api repository against its own harness
+(`pytest`, `asyncio_mode = "auto"`).
 
-The chat2api config currently stores account credentials inline in `options`,
-despite its own README claiming secrets are referenced by env-var name. Under
-D2 the editor makes these editable in the GUI. The mitigations are: masked
-fields by default, explicit per-field reveal, exact preservation of untouched
-values, atomic replace with backup, and refusal on concurrent modification.
-Migrating these values to env-var references remains the correct long-term fix
-and is explicitly deferred.
+Live checks stay manual and are documented as optional probes: real service
+validators against the live venvs, and a post-restart assertion that
+`chat2api` binds the configured port (Target B).
 
-For file-bridge, `save_root` is a filesystem capability: the editor can point
-the service at any writable directory. The in-process rule only requires that
-the directory exists and is writable; it does not attempt to judge whether the
-chosen location is sensible.
+## 10. Out of Scope
 
-## Documentation Changes
-
-- `README.md`: remove the "*(Excluded: … file-bridge …)*" note, list all five
-  services, and describe the two new configuration surfaces.
-- `config/app_registry.py`: correct the docstring to name only `free-tts`.
-- `docs/superpowers/specs/2026-10-04-ai-manager-design.md` and
-  `-audit-report.md` are historical records; they are not rewritten, but the
-  new specification supersedes their exclusion statement.
+Env-var credential migration; live model drift polling; `free-tts`; chat2api
+provider, registry, request, or discovery behaviour; any change to file-bridge
+source.
