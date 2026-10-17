@@ -1,10 +1,14 @@
+import os
 import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Dict, Optional, Tuple
 from PyQt6.QtCore import QObject, QProcess, pyqtSignal
 from ai_manager.config.models import ServiceRunState, ServiceStatus, SupervisorStatus
+
+AUTOSTART_DISABLE_ENV = "AI_MANAGER_DISABLE_SUPERVISOR_AUTOSTART"
+_AUTOSTART_DISABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 
 SUPERVISOR_RUNNING_RE = re.compile(
     r"^\[.*?\]\s+supervisor running:\s+(?P<pid>\d+)", re.MULTILINE
@@ -83,10 +87,31 @@ class SupervisorManager(QObject):
     status_updated = pyqtSignal(SupervisorStatus)
     action_completed = pyqtSignal(str, bool, str)  # action_name, success, message
 
+    # Process-wide autostart state. Set at claim time and never cleared, so the
+    # attempt happens at most once per process no matter how many windows exist.
+    # Always accessed as ``SupervisorManager.<name>``; never via ``self``.
+    _autostart_consumed: ClassVar[bool] = False
+    _autostart_cancel_epoch: ClassVar[int] = 0
+
+    # (action name, success message, failure template) per spawnable command.
+    _ACTIONS: ClassVar[Dict[str, Tuple[str, str, str]]] = {
+        "start": (
+            "start_supervisor",
+            "Supervisor started.",
+            "Failed to start supervisor: {}",
+        ),
+        "stop": (
+            "stop_supervisor",
+            "Supervisor stopped.",
+            "Failed to stop supervisor: {}",
+        ),
+    }
+
     def __init__(self, workspace_root: Optional[Path] = None, parent: Optional[QObject] = None):
         super().__init__(parent)
         self.workspace_root = workspace_root
         self.executable = find_ai_backends_executable(workspace_root)
+        self._autostart_epoch: Optional[int] = None
         self._status_process = QProcess(self)
         self._status_output_buffer = bytearray()
         self._status_process.readyReadStandardOutput.connect(self._on_status_ready_read)
