@@ -5,48 +5,53 @@
 `ai-manager` administers the external `ai-backends` shell supervisor, which keeps
 five local AI backends alive (`ai-grammar`, `textkit`, `yt2txt`, `chat2api`,
 `file-bridge`). Today the GUI only *observes* the supervisor: `MainWindow` polls
-`ai-backends status` every `poll_interval_ms` and renders the result, but nothing
-ever starts the supervisor. A user who launches `ai-manager` and sees
-"Stopped / Inactive" must click **Start Supervisor** by hand.
+`ai-backends status` every `poll_interval_ms` and renders the result. Launching the
+app never starts the supervisor automatically, so a user who opens `ai-manager` and
+sees "Stopped / Inactive" must click **Start Supervisor** by hand.
 
-This feature makes launching `ai-manager` perform **one automatic startup attempt**,
-and only when `ai-backends status` explicitly reports that the supervisor is not
-running.
+This feature adds **one automatic startup attempt at launch**, taken only when
+`ai-backends status` explicitly reports that the supervisor is not running.
 
 ### Goals
 
-1. On launch, if the probe exits normally with code 0 **and** explicitly prints
-   `supervisor not running` (and does not also print a running header), start the
-   supervisor exactly once.
-2. If the probe reports the supervisor running, reports anything unrecognised or
-   contradictory, or fails in any way: no automatic action at all.
-3. At most one automatic attempt per **process**, whether or not it succeeds.
-4. Manual intent wins: a manual **Start** or **Stop** from any window, in any
-   window, cancels the pending automatic attempt process-wide. Stop must stay
-   stopped.
-5. Automatic failures are silent. Only explicit user actions may raise the
-   existing "Supervisor Action Failed" dialog.
-6. No new user-visible UI, no new persisted setting.
-7. Automated tests must never start, stop, or restart real backends.
+1. At launch, when the probe exits normally with code 0 and its output contains
+   `supervisor not running` and does **not** contain `supervisor running: <pid>`,
+   start the supervisor once.
+2. Any other probe outcome — running, unrecognised, contradictory, non-zero exit,
+   abnormal exit, spawn failure — causes no automatic action.
+3. At most one automatic attempt per process, permanently, regardless of windows,
+   cancellations, failures, or later entry-point calls.
+4. Manual intent wins over a pending automatic start, from any window. After a
+   manual **Stop** the supervisor stays stopped.
+5. The guarantee is bounded and stated honestly: a manual Stop issued *before* the
+   automatic spawn wins; a Stop issued *after* a detached `start` has been launched
+   cannot cancel it, because `ai-backends start` is a separate detached process
+   (`start_all_fresh()`, `/home/henry/Development/ai/ai-backends:251`). The
+   follow-up Stop does run after the start has begun killing/starting services, so
+   the observable end state is "stopped", and this is the strongest ordering the
+   GUI can impose without changing `ai-backends`.
+6. Automatic failures are silent; only explicit user actions may raise the existing
+   "Supervisor Action Failed" dialog.
+7. No new user-visible UI and no new persisted setting.
+8. Automated tests never start, stop, or restart real backends.
 
 ### Non-Goals (explicitly out of scope)
 
-- Auto-restart after the supervisor dies while the GUI is running, and any
-  "keep alive" guarantee. The single attempt's outcome is observed by the ordinary
-  status poll, not awaited.
-- Changing `ai-backends` semantics. `start` is a teardown: `start_all_fresh()`
-  (`/home/henry/Development/ai/ai-backends:251`) TERMs the previous supervisor,
-  kills every backend by PID file **and** by project-path scan, and starts all
-  services fresh. It never re-adopts running backends.
+- Auto-restart after the supervisor dies while the GUI runs; no keep-alive.
+- Awaiting the outcome of the attempt. It is observed through the ordinary poll.
+- Changing `ai-backends`. In particular, `start` is destructive:
+  `start_all_fresh()` TERMs any existing supervisor, kills every backend by PID file
+  **and** project-path scan, and starts all services fresh. It never re-adopts
+  running backends, which is why an automatic attempt must never fire against a
+  running supervisor.
 - A settings toggle, CLI flag, or tray entry.
-- Atomicity of "start only if stopped". A status observation followed by `start`
-  cannot exclude an external controller starting the supervisor in between; only a
-  supervisor-side atomic operation could. The GUI's guarantee is a best-effort
-  check made immediately before the decision.
+- Atomic "start iff stopped". A status observation followed by `start` cannot
+  exclude an external controller starting the supervisor in between; only a
+  supervisor-side atomic operation could.
 
 ## 2. Approved Behaviour
 
-Launch sequence, unchanged until the last step:
+Launch sequence, unchanged except the last two steps:
 
 ```text
 MainWindow.__init__
@@ -56,239 +61,254 @@ MainWindow.__init__
   └─ supervisor_manager.start_if_not_running()   ← was refresh_status()
 ```
 
-Decision table for the single automatic attempt:
+Decision table for the attempt:
 
 | Probe outcome | Automatic start? |
 | --- | --- |
-| exit 0, output has `supervisor running: <pid>` only | no |
-| exit 0, output has `supervisor not running` only | **yes, once** |
-| exit 0, output has both headers (contradictory) | no (running wins) |
+| exit 0, `supervisor running: <pid>` only | no |
+| exit 0, `supervisor not running` only | **yes, once** |
+| exit 0, both headers (contradictory) | no (running wins) |
 | exit 0, output unrecognised (empty / usage / garbage) | no |
 | non-zero exit code (e.g. bash usage error) | no |
 | abnormal exit status (`CrashExit`) | no |
-| could not spawn (`FailedToStart`; missing or non-executable script) | no |
-| attempt already claimed in this process | no |
-| a status probe is already in flight | no (and nothing is claimed) |
-| autostart disabled by environment | no (and no probe is issued) |
+| could not spawn (`FailedToStart`: missing or non-executable) | no |
+| attempt already consumed in this process | no |
+| this manager's status process was busy | no (nothing consumed) |
+| autostart disabled by environment | no (no probe issued, nothing consumed) |
+| manual Start/Stop/quit observed before the spawn | no |
 
 `is_running` is never used as authorisation: `parse_supervisor_status`
-(`supervisor.py:41`) yields `is_running=False` for *any* unrecognised output, so
-"false" is not evidence the script said stopped. Authorisation requires the
-positive match `SUPERVISOR_NOT_RUNNING_RE`, **no** `SUPERVISOR_RUNNING_RE` match,
-exit code 0, and `NormalExit`, together.
+(`supervisor.py:41`) yields `is_running=False` for *any* unrecognised output. The
+positive tests are `SUPERVISOR_NOT_RUNNING_RE` present, `SUPERVISOR_RUNNING_RE`
+absent, exit code 0, and `NormalExit`.
 
 ### User-visible surface
 
 No new widget, label, dialog, menu item, or tray action. A successful attempt
-shows up only through today's rendering: the "Supervisor:" label and the
-per-service badges move to "Running (PID …)" when the follow-up refresh or the
-next poll observes the new supervisor. While an attempt is pending or failed, the
-window shows exactly what it shows today.
+appears only through today's rendering: the "Supervisor:" label and the per-service
+badges move to "Running (PID …)" when the follow-up refresh or the next poll sees
+the new supervisor. While the attempt is pending or failed, the window shows
+exactly what it shows today.
 
 One UI-adjacent cleanup: `MainWindow._on_supervisor_btn_clicked`
 (`main_window.py:287-291`) has an if/else whose branches both call
-`start_supervisor()`; it collapses to one call. No behaviour change, no new text.
+`start_supervisor()`; it collapses to a single call. No behaviour change.
 
 ## 3. Architecture
 
 ### 3.1 Components
 
-`SupervisorManager` (`src/ai_manager/services/supervisor.py`) owns every
-`ai-backends` invocation:
+All supervisor state and every `ai-backends` invocation live in
+`SupervisorManager` (`src/ai_manager/services/supervisor.py`). Three monotone
+process-wide values plus one per-manager value:
 
 ```python
 AUTOSTART_DISABLE_ENV = "AI_MANAGER_DISABLE_SUPERVISOR_AUTOSTART"
 _DISABLED_VALUES = frozenset({"1", "true", "yes", "on"})
 
 class SupervisorManager(QObject):
-    # Process-wide autostart state. Written only as
-    # `SupervisorManager._autostart_pending`, never through `self`, so no
-    # instance attribute can shadow it.
-    _autostart_pending: ClassVar[bool] = False
+    # Process-wide, monotone. Written only as SupervisorManager.<name>, never
+    # through `self`, so no instance attribute can shadow them.
+    _autostart_consumed: ClassVar[bool] = False   # False -> True, never back
+    _autostart_cancel_epoch: ClassVar[int] = 0    # ++ on every manual Start/Stop
+    _autostart_owner: ClassVar[Optional["SupervisorManager"]] = None
+
+    # Per-manager: the epoch stamped on the probe that claimed the attempt.
+    self._autostart_epoch: Optional[int] = None
 
     @staticmethod
     def autostart_disabled() -> bool: ...
     def start_if_not_running(self) -> bool: ...
     def cancel_pending_autostart(self) -> None: ...
-    def start_supervisor(self) -> None: ...   # public manual entry, unchanged
-    def stop_supervisor(self) -> None: ...    # public manual entry, unchanged
+    def start_supervisor(self) -> None: ...
+    def stop_supervisor(self) -> None: ...
     def _spawn_supervisor(self, command: str, *, silent: bool) -> bool: ...
 ```
 
 `MainWindow` (`src/ai_manager/ui/main_window.py`): the `__init__` final call, the
-`aboutToQuit` connection, cancellation inside `_exit_application`, and the
-collapsed button branch.
+`aboutToQuit` connection, cancellation in `_exit_application`, and the collapsed
+button branch.
 
 ### 3.2 Flow
 
 ```text
 start_if_not_running() -> bool
-  if autostart_disabled():                   return False   # no probe, nothing claimed
-  if SupervisorManager._autostart_pending:   return False   # pending or already consumed
-  if self._status_process.state() != NotRunning: return False  # no probe would be issued
-  SupervisorManager._autostart_pending = True               # claim before probing
-  self.refresh_status()                                     # guaranteed to start a process
+  if autostart_disabled():                            return False
+  if SupervisorManager._autostart_consumed:           return False
+  if SupervisorManager._autostart_owner is not None:  return False
+  if self._status_process.state() != NotRunning:      return False   # nothing would be launched
+  SupervisorManager._autostart_consumed = True                      # consume at claim time
+  SupervisorManager._autostart_owner = self
+  self._autostart_epoch = SupervisorManager._autostart_cancel_epoch
+  self.refresh_status()                                             # a probe really starts
   return True
 
 _on_status_finished(exit_code: int, exit_status: QProcess.ExitStatus)
   output = self._status_output_buffer.decode("utf-8", errors="replace")
   status = parse_supervisor_status(output)
-  authorized = (
-      SupervisorManager._autostart_pending
-      and exit_code == 0
-      and exit_status == QProcess.ExitStatus.NormalExit
-      and SUPERVISOR_NOT_RUNNING_RE.search(output) is not None
-      and SUPERVISOR_RUNNING_RE.search(output) is None
-  )
-  SupervisorManager._autostart_pending = False              # consume, always
-  started = authorized and self._spawn_supervisor("start", silent=True)
-  self.status_updated.emit(status)                          # after any spawn decision
-  if started:
-      self.refresh_status()
+
+  claimed_here = self._autostart_has_live_claim()   # owner is self, epoch still current
+  if claimed_here:
+      self._release_autostart_claim()               # before any side effect
+  self.status_updated.emit(status)                  # ordinary rendering, unchanged
+  if not claimed_here:
+      return
+  if not (exit_code == 0
+          and exit_status == QProcess.ExitStatus.NormalExit
+          and SUPERVISOR_NOT_RUNNING_RE.search(output) is not None
+          and SUPERVISOR_RUNNING_RE.search(output) is None):
+      return
+  if self._autostart_epoch != SupervisorManager._autostart_cancel_epoch:
+      return                                        # cancelled while we emitted
+  if self._spawn_supervisor("start", silent=True):
+      self.refresh_status()                         # ordinary follow-up probe
 
 _on_status_error(error)
-  SupervisorManager._autostart_pending = False              # failed probe never authorises
+  if self._autostart_has_live_claim():
+      self._release_autostart_claim()
   self.status_updated.emit(SupervisorStatus(is_running=False, supervisor_pid=None, services={}))
 
-start_supervisor()      # toolbar + tray "Start All Services"
+_autostart_has_live_claim() -> bool
+  return (SupervisorManager._autostart_owner is self
+          and self._autostart_epoch == SupervisorManager._autostart_cancel_epoch)
+
+_release_autostart_claim()
+  SupervisorManager._autostart_owner = None
+  self._autostart_epoch = None
+
+start_supervisor()          # toolbar + tray "Start All Services"
   self.cancel_pending_autostart()
   if self._spawn_supervisor("start", silent=False):
       self.refresh_status()
 
-stop_supervisor()       # toolbar + tray "Stop All Services"
+stop_supervisor()           # toolbar + tray "Stop All Services"
   self.cancel_pending_autostart()
   if self._spawn_supervisor("stop", silent=False):
       self.refresh_status()
 
 cancel_pending_autostart()
-  SupervisorManager._autostart_pending = False              # process-wide; never re-armed
+  SupervisorManager._autostart_cancel_epoch += 1     # monotone; invalidates any claim
+  SupervisorManager._autostart_owner = None          # never restores _autostart_consumed
 ```
 
-`_spawn_supervisor(command, *, silent)` is the existing body of
-`start_supervisor`/`stop_supervisor` factored once:
+`_spawn_supervisor(command, *, silent) -> bool` is today's spawn body, factored
+once, with argv `[self.executable, command]`, `start_new_session=True`, and the
+existing `action_completed` names/messages for `silent=False`:
 
 ```
-try:
-    subprocess.Popen([self.executable, command], start_new_session=True)
-except Exception as e:
-    if not silent:
-        self.action_completed.emit(
-            "start_supervisor" if command == "start" else "stop_supervisor", False,
-            f"Failed to {'start' if command == 'start' else 'stop'} supervisor: {e}")
-    return False
-if not silent:
-    self.action_completed.emit(
-        "start_supervisor" if command == "start" else "stop_supervisor", True,
-        f"Supervisor {'started' if command == 'start' else 'stopped'}.")
-return True
+"start_supervisor" / "started"  for command == "start"
+"stop_supervisor"  / "stopped"  for command == "stop"
+"Failed to start supervisor: {e}" / "Failed to stop supervisor: {e}"
 ```
 
-Its argv, kwargs, signal names and messages are byte-identical to today's
-`start_supervisor`/`stop_supervisor`, so `tests/test_supervisor.py` keeps passing.
+These strings, the argv, and the kwargs are byte-identical to the current
+implementation (`supervisor.py:128-145`), so `tests/test_supervisor.py` passes
+unchanged.
 
-### 3.3 Why each rule is load-bearing
+### 3.3 Why this shape (and what the three previous drafts got wrong)
 
-**One process-wide flag, deliberately not per manager.** The app is a tray
-application that can hold more than one window (tests construct many).
-A per-manager flag let window A start while the user pressed Stop in window B, and
-allowed two managers to both launch `start` — which would tear down every backend
-twice. A single class attribute answers both: "has this process used its attempt?"
-and "is an attempt still armed?". Both are the same question once the claim is
-taken, so a second conflation trap is avoided by *not* having two fields.
+Three earlier drafts shared one defect and were rejected for it: they used a
+*mutable boolean* to mean both "armed" and "consumed". Every review round then
+found another interleaving — a second window re-arming it, a second manager's poll
+consuming it, a manual Stop converting into a start, a synchronous signal receiver
+outranking a cached authorisation. The fix is structural, not another patch:
 
-**Claim before probing; consume on every terminal path.** Claiming inside
-`start_if_not_running` (not in the completion callback) makes a second window's
-call return `False` while the first probe is still in flight. Consuming in
-`_on_status_finished` *and* `_on_status_error` *and* `start_if_not_running`'s
-busy-guard means no status result, poll tick, or repeated entry call can ever
-authorise a second attempt. A failed attempt is not retried: retrying is exactly
-the loop this feature must not become.
+**`_autostart_consumed` is monotone.** It is set at claim time and never cleared.
+False means "this process has not used its attempt"; True means "it is spent", and
+no entry call, cancellation, failure, or new window can return it to False.
+Cancelling therefore cannot make the attempt eligible again.
 
-**Busy-probe guard before claiming.** `refresh_status()` is a no-op while
-`_status_process` is `Starting`/`Running` (`supervisor.py:100`). Without the guard,
-a pre-existing probe would make `start_if_not_running()` return `True` while no
-new process was issued, and the in-flight probe's *own* result — possibly
-`not running` from before the user's Stop — would be treated as authorisation.
-The guard makes the return value mean what it says: a probe was actually issued.
+**The claim is owned, not global-only.** `_autostart_owner` identifies the manager
+whose probe claimed the attempt, and only that manager's terminal callback may act
+on it. Another manager's poll — running or failing — cannot consume the claim,
+cannot suppress the attempt, and cannot authorise a spawn from a probe it did not
+send.
 
-**Spawn before emit.** `status_updated` is a Qt signal whose receivers run
-synchronously inside the emit. Emitting first and spawning afterwards let a
-receiver that calls `stop_supervisor()` (or any status handler that cancels) be
-overridden by the cached authorisation. Composing the decision, clearing the flag,
-and spawning *before* the emit removes the re-entrancy window with no token
-machinery. The emitted status is the probe that authorised the spawn — stale by one
-step, which is exactly what it is today, and the follow-up refresh corrects it.
+**Cancellation is a monotone epoch, not a flag.** `cancel_pending_autostart()`
+increments `_autostart_cancel_epoch`; the claiming manager remembers the epoch at
+claim time and compares before spawning. Any manual Start/Stop from any window,
+and any quit, therefore invalidates a pending attempt process-wide, and the
+comparison survives nested event loops.
 
-**Manual actions keep their exact old contract.** Same argv, same kwargs, same
-`action_completed` names/messages, same trailing refresh; the only addition is the
-cancellation. Existing tray and toolbar behaviour and `tests/test_supervisor.py`
-are untouched.
+**Authorisation is re-derived, never cached across the emit.** `status_updated` is
+a Qt signal whose receivers run synchronously. An earlier draft computed
+`authorized`, cleared the flag, emitted, and then spawned from the cached boolean —
+so a receiver that called `stop_supervisor()` still got an automatic start
+(`start` then `stop`). This draft releases the claim, emits, and only then
+re-checks the epoch: a receiver that cancels makes the epoch stale and the spawn is
+skipped. Emitting before spawning also means the emitted status never post-dates
+the spawn, so rendering is not shown a "stopped" state derived from a probe that
+has already been acted upon.
 
-**Automatic failures are silent.** `silent=True` suppresses `action_completed`, so
-`_on_supervisor_action` (`main_window.py:293`) never opens the modal
-**Supervisor Action Failed** dialog for something the user did not request. That
-signal is the only path to that dialog — status completion, status errors, and the
-follow-up refresh all emit `status_updated` instead — and the automatic path never
-touches `_action_process`. Failures stay observable: the label reads
-"Stopped / Inactive" and the next poll re-renders reality.
+**Busy probe is rejected before claiming.** `refresh_status()` is a no-op while
+`_status_process` is `Starting`/`Running` (`supervisor.py:100`). Checking state
+first means a `True` return really means "a probe was launched" and prevents an
+already-in-flight poll's result from being treated as authorisation.
+
+**Manual paths keep their exact old contract.** Same argv, kwargs, signal
+names/messages, and trailing refresh; the only addition is cancellation, which
+invalidates a *pending* automatic attempt and never touches manual behaviour. The
+tray's "Start All Services" and "Stop All Services" therefore behave exactly as
+before.
+
+**Automatic failures stay silent.** `silent=True` suppresses `action_completed`,
+the only route to the modal **Supervisor Action Failed** dialog
+(`main_window.py:293`); status completion, status errors, and the follow-up refresh
+all emit `status_updated` instead, and the automatic path never touches
+`_action_process`. Failure remains observable: the label reads "Stopped / Inactive"
+and the next poll re-renders reality.
 
 **Follow-up refresh is a local result.** `_spawn_supervisor` returns `bool`; the
-follow-up `refresh_status()` happens only on `True`. The flag is already clear, so
-that refresh and every later poll can never authorise anything.
+follow-up probe is requested only on `True`, after the claim is already spent, so it
+cannot authorise anything.
 
 ### 3.4 Quit vs. hide
 
-`closeEvent` (`main_window.py:400`) has two accept paths: the `_force_quit` branch
-(accept and return) and the ordinary non-tray branch, which accepts and then calls
-`_exit_application()` (`main_window.py:435`). It *ignores* the close and hides to
-tray when `close_to_tray` is enabled. Two question dialogs — `handle_quit`'s and
-`closeEvent`'s unsaved-changes prompt — run nested event loops.
+`closeEvent` (`main_window.py:400`) accepts on the `_force_quit` branch, ignores and
+hides to tray when `close_to_tray` is enabled, and otherwise accepts and calls
+`_exit_application()` (`main_window.py:435`). Both unsaved-changes prompts
+(`handle_quit`, `closeEvent`) run nested event loops.
 
-Specified behaviour:
-
-- **Hide to tray keeps the attempt armed.** The process is still supervising; an
-  in-flight attempt should complete.
-- **Quitting does not.** Cancellation is hooked in two places so no shutdown path
-  is missed: `_exit_application()` (which both accept paths reach) and
-  `QApplication.instance().aboutToQuit`, which also covers a direct
-  `app.quit()`/`QApplication.quit()` from anywhere while visible, hidden, or
-  minimised.
-- **Confirmation dialogs do not cancel.** While a quit prompt is open the process
-  is still running and still supervising, so completing a pending start is
-  correct; if the user then cancels the quit, the app simply continues with a
-  supervisor it would have started anyway. If they confirm, the exit path cancels
-  anything still pending. This is stated explicitly because "cancel as early as
-  possible" and "don't cancel on a decision you might revoke" are both defensible;
-  this design picks the second.
-- A spawned supervisor outlives the GUI (`start_new_session=True`), exactly as
-  today when the user clicks Start and then quits.
+- **Hide to tray keeps a pending attempt alive.** The process is still supervising.
+- **Quitting cancels.** Cancellation is hooked in `_exit_application()` (reached by
+  both accept paths) *and* `QApplication.instance().aboutToQuit`, which also covers
+  a direct `app.quit()` from anywhere. A late probe result finds a stale epoch and
+  does nothing.
+- **Confirmation prompts do not cancel.** While a quit prompt is open the process is
+  still running and still supervising, so completing a pending start is correct; if
+  the user cancels the quit, the app continues with a supervisor it would have
+  started anyway. If they confirm, the exit path cancels whatever is still pending
+  and stops any spawn that has not happened yet.
+- A spawned supervisor outlives the GUI (`start_new_session=True`), exactly as it
+  does today when the user clicks Start and then quits.
 
 ## 4. Error Handling
 
 | Failure | Behaviour |
 | --- | --- |
-| `ai-backends` missing / not executable | verified on Qt 6/PyQt6 6.11: `errorOccurred(FailedToStart)` and **no** `finished`; flag cleared, `SupervisorStatus(is_running=False, services={})` emitted, window usable, no start, no dialog |
-| exits non-zero (bash usage error) | verified: `finished(3, NormalExit)`; the code check rejects it, so no start |
-| abnormal exit (`CrashExit`) | `finished(_, CrashExit)`; exit-status check rejects it |
-| output empty / usage text / garbage with exit 0 | no `supervisor not running` match; no start |
-| both headers present | contradictory; `SUPERVISOR_RUNNING_RE` match vetoes; no start |
-| `Popen` raises during automatic attempt | swallowed, returns `False`, no `action_completed`, no dialog, label stays stopped |
-| `Popen` raises during manual action | unchanged: `action_completed(..., False, msg)` → existing dialog |
-| probe hangs | no overlapping probes (`refresh_status` early-returns); the attempt stays pending until it reports finished/error; manual Start/Stop or quit cancels it |
-| quit during probe | cancelled by `_exit_application` / `aboutToQuit`; a late `finished` sees the flag clear |
-| two windows | second manager's `start_if_not_running()` returns `False`; one attempt per process |
-| probe buffering | the existing same-thread `readyReadStandardOutput` wiring accumulates all output before `finished` (checked at 64 B, 64 KiB and 1 MiB); no tail is lost |
+| `ai-backends` missing / not executable | verified on Qt 6 / PyQt6 6.11: `errorOccurred(FailedToStart)` and **no** `finished`; claim released, `SupervisorStatus(is_running=False, services={})` emitted, no start, no dialog |
+| exits non-zero (bash usage error) | verified: `finished(3, NormalExit)`; the code check rejects it |
+| abnormal exit (`CrashExit`) | exit-status check rejects it |
+| empty / usage / garbage output, exit 0 | no positive `not running` match; no start |
+| both headers present | contradictory; the `running` match vetoes |
+| `Popen` raises during an automatic attempt | swallowed, returns `False`, no `action_completed`, no dialog |
+| `Popen` raises during a manual action | unchanged: `action_completed(..., False, msg)` → existing dialog |
+| probe hangs | no overlapping probes; the claim stays owned until it reports finished or error; manual Start/Stop or quit invalidates it via the epoch |
+| quit during probe | cancelled via `_exit_application` / `aboutToQuit`; late result finds a stale epoch |
+| two windows | second manager's entry returns `False` (`owner is not None`), and its polls cannot consume or authorise the first manager's claim |
+| probe buffering | existing same-thread `readyReadStandardOutput` wiring accumulates all output before `finished` (checked at 64 B, 64 KiB, 1 MiB) |
+| manual Stop after the detached start was launched | cannot cancel it; the Stop command runs after and leaves the supervisor stopped — the bounded guarantee of Goal 5 |
 
-Startup never blocks: async `QProcess` probe, `Popen` spawn, so the window paints
-before `main.py` calls `window.show()`.
+Startup does not block the event loop: the probe is async `QProcess`, the spawn is
+`Popen`, so `main.py` proceeds to `window.show()` without waiting for the supervisor
+to come up.
 
 ## 5. Test-Safety Hazard
 
 `tests/test_main_window.py`, `test_main_window_tray.py`, `test_mnemonic.py` build
 `MainWindow` against temp workspaces; `tests/test_e2e_integration.py` builds one
-against the **live** workspace. `SupervisorManager` resolves its executable via
-`find_ai_backends_executable`, whose last resort is the hardcoded
-`/home/bin/ai-backends` (`supervisor.py:34`) — the real script on this machine.
+against the **live** workspace. `find_ai_backends_executable`'s last resort is the
+hardcoded `/home/bin/ai-backends` (`supervisor.py:34`) — the real script here.
 Unguarded, `pytest` would tear down and restart the developer's live backends.
 
 Mitigation (both layers required):
@@ -296,98 +316,104 @@ Mitigation (both layers required):
 1. `start_if_not_running()` returns `False` before any claim or probe when
    `AI_MANAGER_DISABLE_SUPERVISOR_AUTOSTART` normalises to `1`, `true`, `yes`, or
    `on` (case-insensitive, stripped). Unset or any other value means enabled. The
-   check happens at entry only — flipping the variable mid-probe does not cancel an
-   already-armed attempt; that is `cancel_pending_autostart`'s job.
+   check is at entry only: flipping it mid-probe does not cancel an armed attempt —
+   that is `cancel_pending_autostart`'s job.
 2. `tests/conftest.py` gains a **function-scoped autouse** fixture that sets that
-   variable via `monkeypatch.setenv`. Function scope is required because
-   `monkeypatch` is function-scoped. Living in `conftest.py` makes it apply to
-   single-module runs (`pytest tests/test_main_window.py`) too.
+   variable with `monkeypatch.setenv`. Function scope is required (`monkeypatch` is
+   function-scoped) and `conftest.py` placement makes it apply to single-module runs
+   too.
 
-Precise scope of the guard: it prevents **destructive** commands (`start`/`stop`).
-It does not stop the pre-existing poll timer from running read-only
-`ai-backends status`. The safety evidence for ordinary tests is therefore
-"no `start`/`stop` argv ever reached `subprocess.Popen`", asserted with a
-recorder — not the environment variable alone.
+Scope, stated precisely: the guard prevents **destructive** commands
+(`start`/`stop`). It does not stop the pre-existing poll timer from running
+read-only `ai-backends status`. Ordinary-test safety is therefore evidenced by
+"no `start`/`stop` argv reached `subprocess.Popen`" from a recorder, not by the
+environment variable alone.
 
 ## 6. Test Strategy (TDD; written first, red before implementation)
 
-Two new files plus a shared fixture.
+Two new test files plus shared fixtures in `tests/conftest.py`.
 
-**`tests/conftest.py`** (added):
+**`tests/conftest.py`** additions:
 
 - autouse function-scoped `_disable_supervisor_autostart` (env var, §5.2);
-- `autostart_env` — opt-in, `monkeypatch.delenv(...)`, and it **restores process
-  state with `monkeypatch`**: `monkeypatch.setattr(SupervisorManager,
-  "_autostart_pending", False)`. Because the flag is process-wide, every test that
-  touches it must get it reset *and restored*, and must cancel any outstanding
-  probe before the launch patches are undone.
+- `autostart_env` opt-in fixture that `monkeypatch.delenv(...)`s the variable and
+  resets process state **with restoration**:
+  `monkeypatch.setattr(SupervisorManager, "_autostart_consumed", False)`,
+  `... "_autostart_owner", None)`, `... "_autostart_cancel_epoch", 0)`.
+  Because these are process-wide, each test must both reset and restore them, and
+  must cancel/await outstanding probes before its patches are undone.
 
-**`tests/test_supervisor_autostart.py`** — fixtures:
+**`tests/test_supervisor_autostart.py`** fixtures:
 
-- `recorder` — `subprocess.Popen` patched to append argv and return `MagicMock`;
-  optionally raises (`raise_oserror`);
-- `probes` — `QProcess.start` records how many processes were really launched
-  (distinct from `refresh_status` requests, which is what test 14 counts);
-- `manager` — `SupervisorManager(workspace_root=tmp_path)` with both patches;
-- `deliver(manager, output, code=0, status=NormalExit)` — fills
-  `_status_output_buffer`, calls `_on_status_finished(code, status)`. Every test
-  goes through the **public entry point plus the real completion callback**.
+- `recorder` — `subprocess.Popen` patched to append argv and return `MagicMock`,
+  optionally raising `OSError`;
+- `fake_status_process` — a stub exposing `state()` and `start()`, so
+  `refresh_status()` and the busy guard can be exercised **with explicit state
+  transitions**: `start()` → `Starting`, then the fixture sets `NotRunning` before
+  the test delivers output. This is required because `deliver()` calls
+  `_on_status_finished` directly and does not move the real `QProcess` (an earlier
+  draft missed this: test 3's post-consumption entry would be rejected as busy);
+- `manager` — `SupervisorManager(workspace_root=tmp_path)` wired to the above;
+- `deliver(manager, output, code=0, status=QProcess.ExitStatus.NormalExit)` — sets
+  the fake process to `NotRunning`, fills `_status_output_buffer`, calls
+  `_on_status_finished(code, status)`.
+
+Every test drives the **public entry point plus the real completion callback**.
 
 | # | Test | Falsifiable because |
 | --- | --- | --- |
 | 1 | `starts_once_when_status_reports_stopped` | unchanged code spawns nothing; asserts `[exe, "start"]` + `start_new_session=True` |
-| 2 | `does_not_start_when_running` | zero spawn **and** entry returned `True` with one probe issued |
-| 3 | `is_one_shot_across_repeated_entry_calls` — call entry twice before delivery, once **after** consumption, deliver stopped twice; assert one spawn | a per-call re-arm spawns 2-3 times |
-| 4 | `manual_stop_during_first_probe_never_converts_into_a_start` — entry, `stop_supervisor()`, then deliver the in-flight stopped output; argv must be exactly `[[exe, "stop"]]` | the single-flag draft yields `stop → start` |
-| 5 | `manual_start_during_first_probe_never_double_starts` | two spawns without cancellation |
-| 6 | `probe_failure_does_not_start_and_a_later_status_cannot_rearm` — armed, `_on_status_error`, then deliver stopped | fails if the flag is left armed |
-| 7 | `unrecognised_output_never_starts` — three independently armed cases: `""`, `"usage: …"`, and a mixed running+stopped header | `is_running == False` alone starts |
+| 2 | `does_not_start_when_running` | zero spawn **and** entry returned `True` with one probe launched |
+| 3 | `is_one_shot_across_repeated_entry_calls` — entry twice before delivery, once **after** consumption, deliver stopped twice | a re-arming guard spawns 2-3 times; the fake process must be `NotRunning` so the post-consumption call is not masked by the busy guard |
+| 4 | `manual_stop_during_first_probe_never_converts_into_a_start` — entry, `stop_supervisor()`, then deliver the in-flight stopped output; argv exactly `[[exe, "stop"]]` | a claim that ignores cancellation yields `stop → start` |
+| 5 | `manual_start_during_first_probe_never_double_starts` | an invalidating cancel yields one `start` |
+| 6 | `probe_failure_does_not_start_and_a_later_status_cannot_rearm` — armed, `_on_status_error`, deliver stopped | fails if the claim survives the error |
+| 7 | `unrecognised_output_never_starts` — three independently armed cases: `""`, `"usage: …"`, mixed running+stopped headers | `is_running == False` alone would start |
 | 8 | `nonzero_exit_never_starts` — stopped output with `code=3` | guards the verified `NormalExit` + real-code case |
 | 9 | `abnormal_exit_status_never_starts` — `CrashExit` | exit-status enum honoured separately |
-| 10 | `disabled_by_environment` — for `1`/`true`/`TRUE`/` yes ` and friendlies: no probe, flag untouched (`False`); then, in the **same test without resetting the flag**, delete the env var and assert the enabled path starts | a mutant claiming *before* the env check leaves the flag `True` and fails the first half; a no-op implementation fails the second |
-| 11 | `second_manager_never_starts_again` — both managers' entry points called and asserted `True`/`False` **before** either delivery; then deliver stopped to both; one spawn, one probe | a mutant that claims only at completion passes a sequential version; this one does not |
-| 12 | `automatic_spawn_failure_is_silent` — armed, stopped delivery, `Popen` raises; collector sees no `action_completed` and nothing escapes | only `silent=True` passes |
-| 13 | `manual_spawn_failure_still_reports` — `start_supervisor()` with `Popen` raising; `("start_supervisor", False, …)` emitted | preserves the dialog contract |
-| 14 | `followup_probe_requested_only_after_a_successful_automatic_start` — counts `refresh_status` calls, **uniform totals**: success **2** (initial + follow-up), failed spawn **1**, running **1** | pins the local-result design and its `silent` interaction |
-| 15 | `cancel_is_process_wide_across_managers` — manager A armed (in-flight probe), `manager_b.stop_supervisor()`, then A's stopped delivery; A spawns nothing | per-instance cancellation lets A start |
-| 16 | `busy_probe_is_not_claimed` — force `_status_process` into a running state, call entry: returns `False`, flag stays `False`, no new `QProcess.start` | without the guard the flag is claimed retroactively |
-| 17 | `status_receiver_that_stops_cannot_be_overridden` — arm, connect a `status_updated` receiver that calls `stop_supervisor()`, deliver stopped; argv must be `[[exe, "stop"]]` only | spawn-after-emit produces `start` then `stop` |
+| 10 | `disabled_by_environment` — for `1`/`true`/`TRUE`/` yes `: no probe, `_autostart_consumed` stays `False`; then, in the same test **without resetting state**, delete the env var and assert the enabled path starts | a mutant claiming before the env check leaves `consumed=True`; a no-op implementation fails the second half |
+| 11 | `second_manager_never_starts_again` — both entries called and asserted `True`/`False` **before** either delivery; deliver stopped to both; one spawn | a mutant claiming only at completion passes a sequential version |
+| 12 | `automatic_spawn_failure_is_silent` | only `silent=True` passes |
+| 13 | `manual_spawn_failure_still_reports` | preserves the dialog contract |
+| 14 | `followup_probe_requested_only_after_a_successful_automatic_start` — counts refresh requests with uniform totals: success **2**, failed spawn **1**, running **1** | pins the local-result design |
+| 15 | `cancel_is_process_wide_across_managers` — A claims (probe in flight), `manager_b.stop_supervisor()`, then A's stopped delivery; A spawns nothing | per-instance cancellation lets A start |
+| 16 | `busy_probe_is_not_claimed` — fake process `Running`; entry returns `False` and `_autostart_consumed` stays `False` | without the guard the attempt is claimed retroactively |
+| 17 | `another_managers_poll_cannot_consume_or_authorise_the_claim` — A claims and holds its probe; B's probe errors and then reports stopped; assert B spawns nothing **and** A can still start when it finishes | a single global flag lets B consume A's claim |
+| 18 | `status_receiver_that_stops_wins` — arm, connect a `status_updated` receiver that calls `stop_supervisor()`, deliver stopped; argv is `[[exe, "stop"]]` only | cached authorisation across the emit yields `start` then `stop` |
 
-**`tests/test_main_window_autostart.py`** — must *arm for real*: patch
-`subprocess.Popen` and `refresh_status` per test, keep the env var deleted, and
-patch `SupervisorManager.start_if_not_running` **before** construction only for
-test 18.
+**`tests/test_main_window_autostart.py`** — must arm *for real* (patch
+`subprocess.Popen` and the status process, keep the env var deleted).
 
 | # | Test | Note |
 | --- | --- | --- |
-| 18 | `constructor_requests_one_attempt` — class-method spy installed before construction (attribute lookup happens at call time, so this works); asserts called once and that the constructor did not call `refresh_status` directly | pins the wiring |
-| 19 | `quit_cancels_pending_autostart` — arm through the **real** entry method (never a bare spy, which would not set the flag), assert the flag is armed, call `_exit_application()`, assert `False` and that a later stopped delivery spawns nothing | quit-vs-hide |
-| 20 | `hiding_to_tray_keeps_pending_autostart` — same setup, `close()` with `close_to_tray` enabled; window hidden, flag still armed | the opposite contract |
-| 21 | `cancel_in_the_unsaved_changes_prompt_keeps_the_attempt` — arm, force `has_unsaved_changes()` true and answer Cancel; the attempt is still armed (§3.4 decision) | documents the chosen semantics |
+| 19 | `constructor_requests_one_attempt` — class-method spy on `start_if_not_running` installed before construction (attribute lookup happens at call time); asserts one call and that the constructor did not call `refresh_status` directly | pins the wiring |
+| 20 | `quit_cancels_pending_autostart` — arm through the real entry method, assert the claim is live, call `_exit_application()`, assert the claim is dead and a later stopped delivery spawns nothing | quit-vs-hide |
+| 21 | `hiding_to_tray_keeps_pending_autostart` — same setup, `close()` with `close_to_tray`; window hidden, claim still live | the opposite contract |
+| 22 | `cancel_in_the_unsaved_changes_prompt_keeps_the_attempt` — arm, force `has_unsaved_changes()`, answer Cancel; claim still live (§3.4) | documents the chosen semantics |
 
 Existing tests must keep passing unchanged, especially
-`tests/test_supervisor.py::test_stop_supervisor_runs_stop_command`
-(argv `[exe, "stop"]`, `start_new_session=True`,
-`action_completed("stop_supervisor", True, …)`, trailing `refresh_status`).
+`tests/test_supervisor.py::test_stop_supervisor_runs_stop_command` (argv
+`[exe, "stop"]`, `start_new_session=True`, `action_completed("stop_supervisor",
+True, …)`, trailing refresh).
 
 Red-phase honesty: a test failing only because `start_if_not_running` does not
-exist proves nothing. Tests 13, 15, 16, 17 were each reasoned against a naive
-implementation (per-instance flag, claim-at-completion, no busy guard,
-spawn-after-emit) and fail against it.
+exist proves nothing. Tests 4, 6, 10, 11, 15, 16, 17, 18 were each reasoned against
+the naive implementation it targets (shared flag, claim-at-completion, no busy
+guard, cached authorisation) and fail against it.
 
 ## 7. Verification
 
-1. `pytest` full suite green, with the `Popen` recorder proving no `start`/`stop`
-   argv during ordinary window tests.
-2. Executable resolution: assert `find_ai_backends_executable` returns the
-   workspace copy when present, so the `/home/bin/ai-backends` hardcoded fallback
-   (`supervisor.py:34`) does not silently make tests depend on the host.
-3. Manual, running: note PIDs from `ai-backends status`, launch `./start.sh`;
-   PIDs unchanged, no restart.
-4. Manual, stopped: `ai-backends stop`, launch; within a few seconds the label
-   reads "Running (PID …)" and `ai-backends status` shows running backends.
-5. Manual, stop race: `ai-backends stop`, launch, click **Stop Supervisor**
-   immediately; the supervisor must not come back.
-6. Manual, missing script: temporarily set `AI_WORKSPACE_ROOT` to a directory with
-   no `ai-backends` **and** shadow PATH, because the hardcoded `/home/bin` fallback
-   is otherwise used; window opens, label stopped, **no dialog**.
+1. `pytest` green, with the `Popen` recorder proving no `start`/`stop` argv during
+   ordinary window tests.
+2. Executable resolution: assert `find_ai_backends_executable` prefers the workspace
+   copy when present, so tests do not silently depend on `/home/bin/ai-backends`
+   (`supervisor.py:34`).
+3. Manual, running: note PIDs from `ai-backends status`, launch `./start.sh`; PIDs
+   unchanged, no restart.
+4. Manual, stopped: `ai-backends stop`, launch; within a few seconds the label reads
+   "Running (PID …)" and `ai-backends status` shows running backends.
+5. Manual, stop race (pre-spawn): `ai-backends stop`, launch, click **Stop
+   Supervisor** immediately; the supervisor must not come back.
+6. Manual, missing script: point `AI_WORKSPACE_ROOT` at a directory with no
+   `ai-backends` **and** shadow `PATH`, since the hardcoded `/home/bin` fallback is
+   otherwise used; window opens, label stopped, **no dialog**.
