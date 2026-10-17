@@ -186,10 +186,14 @@ bodies. Byte-compatible with today's messages (see
 `supervisor.py:128-145`).
 
 ```python
-_ACTIONS = {
-    "start": ("start_supervisor", "Supervisor started.", "Failed to start supervisor: {}"),
-    "stop": ("stop_supervisor", "Supervisor stopped.", "Failed to stop supervisor: {}"),
-}
+class SupervisorManager(QObject):
+    # Class attribute, not module-level: `self._ACTIONS[command]` must resolve.
+    _ACTIONS: ClassVar[dict] = {
+        "start": ("start_supervisor", "Supervisor started.",
+                  "Failed to start supervisor: {}"),
+        "stop": ("stop_supervisor", "Supervisor stopped.",
+                 "Failed to stop supervisor: {}"),
+    }
 
 def _spawn_supervisor(self, command: str, *, silent: bool) -> bool:
     action, ok_message, fail_template = self._ACTIONS[command]
@@ -245,9 +249,10 @@ if app is not None:
 self.supervisor_manager.start_if_not_running()
 ```
 
-`QApplication` is already imported. The connection is optional-defensive
-(`app is not None`) so headless tests that construct a window without a
-`QApplication` cannot crash.
+`QApplication` is already imported. The `app is not None` guard is
+optional-defensive only: in practice pytest-qt always provides a `QApplication`
+(and a widget cannot be constructed without one — Qt aborts first), so the guard
+never actually changes behaviour.
 
 ### 3.2 `_exit_application`
 
@@ -289,6 +294,29 @@ from ai_manager.services.supervisor import AUTOSTART_DISABLE_ENV, SupervisorMana
 @pytest.fixture(autouse=True)
 def _disable_supervisor_autostart(monkeypatch):
     monkeypatch.setenv(AUTOSTART_DISABLE_ENV, "1")
+
+
+@pytest.fixture(autouse=True)
+def _no_destructive_supervisor_commands(monkeypatch):
+    """Safety net for EVERY test, including ordinary window tests.
+
+    Records and stubs any `ai-backends start/stop` spawn and fails the test at
+    teardown if one was requested. Read-only `status` polling via QProcess is
+    permitted (the poll timer keeps running).
+    """
+    destructive: list[list[str]] = []
+    real_popen = subprocess.Popen
+
+    def guard(argv, *args, **kwargs):
+        argv_list = list(argv) if not isinstance(argv, str) else [argv]
+        if len(argv_list) > 1 and argv_list[1] in {"start", "stop"}:
+            destructive.append(argv_list)
+            return MagicMock()
+        return real_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", guard)
+    yield
+    assert destructive == [], f"tests must not spawn ai-backends: {destructive}" 
 
 @pytest.fixture
 def autostart_enabled(monkeypatch):
@@ -376,9 +404,32 @@ preferred: importing between test modules couples them).
 
 Copy the workspace/settings fixture approach from `tests/test_main_window_tray.py`
 (temp workspace with three fixture configs, `load_user_settings` /
-`save_user_settings` monkeypatched), then add `autostart_enabled`, the
-`fake_popen`, and a fake status process. Tests here must arm **for real** through
-`start_if_not_running()` except test 19, which spies on the entry point.
+`save_user_settings` monkeypatched), then add `autostart_enabled` and the shared
+`fake_popen` recorder.
+
+**Mandatory: the fake status process must be installed before the constructor's
+probe runs.** `MainWindow.__init__` calls the real `start_if_not_running()`, which
+claims the attempt and starts a probe. Patch `SupervisorManager.__init__` with a
+wrapper that calls the original and immediately swaps `self._status_process` for a
+fresh `FakeStatusProcess` before returning. Give each manager its own fake; share
+one `Popen` recorder across managers.
+
+Window tests must **not** call `arm()` afterwards: the constructor already claimed
+the attempt, so a second `start_if_not_running()` returns `False` and `arm()`'s
+assertions would fail against correct code. Instead assert the constructor's claim
+directly:
+
+```python
+def assert_constructor_claim(window, probes):
+    assert len(probes.starts) == 1
+    assert SupervisorManager._autostart_consumed is True
+    assert SupervisorManager._autostart_owner is window.supervisor_manager
+    assert (window.supervisor_manager._autostart_epoch
+            == SupervisorManager._autostart_cancel_epoch)
+```
+
+If the original `QProcess` was never started it stays idle and harmless as a child;
+do not start it before replacing it.
 
 ## 5. Test cases (normative)
 
@@ -390,18 +441,18 @@ Numbering matches design §6. Each row's assertion is mandatory.
 | --- | --- | --- |
 | 1 | `starts_once_when_status_reports_stopped` | `arm()`; `deliver(SAMPLE_STOPPED_OUTPUT)`; `manager.popens == [[exe, "start"]]`; `popens_kwargs[0]["start_new_session"] is True` |
 | 2 | `does_not_start_when_running` | `arm()`; `deliver(SAMPLE_RUNNING_OUTPUT)`; `manager.popens == []` |
-| 3 | `is_one_shot_across_repeated_entry_calls` | `arm()`; `start_if_not_running() is False`; `deliver(stopped)` -> 1 popen; `deliver(stopped)` after a second `start_if_not_running() is False` -> still 1 |
+| 3 | `is_one_shot_across_repeated_entry_calls` | `arm()`; `start_if_not_running() is False`; `deliver(stopped)` -> 1 popen and a follow-up probe is requested; **complete that follow-up** with `deliver(manager, SAMPLE_RUNNING_OUTPUT)` and assert the fake process is `NotRunning`; only then `start_if_not_running() is False` **and `probes.starts` did not grow** (the consumed guard, not the busy guard, rejected it); a later `deliver(stopped)` adds no popen |
 | 4 | `manual_stop_during_first_probe_never_converts_into_a_start` | `arm()`; `stop_supervisor()`; `deliver(stopped)`; `popens == [[exe, "stop"]]` |
 | 5 | `manual_start_during_first_probe_never_double_starts` | `arm()`; `start_supervisor()`; `deliver(stopped)`; exactly one `start` argv |
 | 6 | `probe_failure_does_not_start_and_a_later_status_cannot_rearm` | `arm()`; `_on_status_error(QProcess.ProcessError.FailedToStart)`; `deliver(stopped)`; `popens == []` |
-| 7 | `unrecognised_output_never_starts` | three independent cases in one test with `autostart_enabled` state reset between them via `monkeypatch`-style re-arming: `""`, `"usage: ai-backends [start|status]\n"`, and `SAMPLE_RUNNING_OUTPUT + SAMPLE_STOPPED_OUTPUT`; each: `arm()`, deliver, assert `popens == []` |
+| 7 | `unrecognised_output_never_starts` | three sub-cases: `""`, `"usage: ai-backends [start|status]\n"`, and `SAMPLE_RUNNING_OUTPUT + SAMPLE_STOPPED_OUTPUT`. **Each sub-case uses a fresh manager, a fresh `FakeStatusProcess`, a fresh recorder, and reset values for all three process-wide attributes** (build it with a plain factory helper, never by calling a pytest fixture); the previous sub-case must be finished or cancelled before the reset. Each: `arm()`, deliver, assert the recorder is empty |
 | 8 | `nonzero_exit_never_starts` | `arm()`; `deliver(stopped, code=3)`; `popens == []` |
 | 9 | `abnormal_exit_status_never_starts` | `arm()`; `deliver(stopped, status=QProcess.ExitStatus.CrashExit)`; `popens == []` |
 | 10 | `disabled_by_environment` | for `"1"`, `"true"`, `"TRUE"`, `" yes "`: `monkeypatch.setenv`, fresh manager, `start_if_not_running() is False`, `probes.starts == []`, `_autostart_consumed is False`; then without resetting those flags `monkeypatch.delenv(...)`, `start_if_not_running() is True` and `deliver(stopped)` yields one `start` |
 | 11 | `second_manager_never_starts_again` | `arm(a)`; `b.start_if_not_running() is False`; `deliver(a, stopped)` -> 1 popen; `deliver(b, stopped)` -> still 1 |
 | 12 | `automatic_spawn_failure_is_silent` | `arm()`; make `Popen` raise `OSError("nope")`; collect `action_completed` into a list; `deliver(stopped)`; `len(popens) == 1` (the attempt was reached); `collected == []` |
 | 13 | `manual_spawn_failure_still_reports` | `Popen` raises; `start_supervisor()`; `collected == [("start_supervisor", False, "Failed to start supervisor: nope")]` |
-| 14 | `followup_probe_requested_only_after_a_successful_automatic_start` | count `refresh_status` calls: success case total **2**, spawn-failure case total **1**, running case total **1** |
+| 14 | `followup_probe_requested_only_after_a_successful_automatic_start` | **three fully isolated sub-cases** (fresh manager/fake/recorder/reset attributes each, as in test 7). In each, wrap the real `refresh_status()` with a counting spy **before** `arm()` and count the initial claim probe plus any follow-up. Success: **2**. Spawn failure: **1**. Running: **1** |
 | 15 | `cancel_is_process_wide_across_managers` | `arm(a)`; `b.stop_supervisor()`; `deliver(a, stopped)`; `a.popens == [[exe, "stop"]]` (b's stop only) |
 | 16 | `busy_probe_is_not_claimed` | force `probes._state = Running`; `start_if_not_running() is False`; `_autostart_consumed is False`; then `probes.finish()` and `arm(manager)` succeeds |
 | 17 | `another_managers_poll_cannot_consume_or_authorise_the_claim` | put B's poll in flight and leave it; `arm(a)`; `deliver(b, stopped)`; `b.popens == []`; then `deliver(a, stopped)` -> exactly one `start` |
@@ -413,11 +464,11 @@ Numbering matches design §6. Each row's assertion is mandatory.
 | --- | --- | --- |
 | 19 | `constructor_requests_one_attempt` | monkeypatch `SupervisorManager.start_if_not_running` with a counting spy returning `True` **before** constructing; assert one call; assert the constructor never called `refresh_status` directly (spy on it, assert 0 calls from the constructor path) |
 | 20 | `quit_cancels_pending_autostart` | build window with autostart enabled and fakes; `arm(window.supervisor_manager)`; `window._exit_application()`; claim is dead (`_autostart_owner is None`); `deliver(stopped)` spawns nothing |
-| 21 | `hiding_to_tray_keeps_pending_autostart` | same setup, `settings.close_to_tray = True`, `window.close()`; `window.isHidden()` is True; claim still live |
+| 21 | `hiding_to_tray_keeps_pending_autostart` | request the existing `mock_tray_available` fixture (without it `closeEvent` takes the exit path), set `close_to_tray=True` **and** `first_close_notice_shown=True`, `window.show()` and assert it is visible first. Then `window.close()` returns `False` (the event was ignored), `window.isHidden()` is `True`, and the constructor's claim is still live |
 | 22 | `cancel_in_the_unsaved_changes_prompt_keeps_the_attempt` | `arm()`; force `has_unsaved_changes()` True; monkeypatch `QMessageBox.question` to return `Cancel`; `window.handle_quit()`; claim still live |
-| 23 | `direct_app_quit_cancels_via_about_to_quit` | `arm()`; `QApplication.instance().quit()`; then simulate the `aboutToQuit` emission (`app.aboutToQuit.emit()` or `processEvents()` after `quit()`), assert claim dead |
+| 23 | `direct_app_quit_cancels_via_about_to_quit` | **must run in an isolated subprocess with a real event loop.** `app.quit()` + `processEvents()` outside `app.exec()` does *not* emit `aboutToQuit` (verified on this Qt 6.11 build), and emitting the signal by hand would only test the connection, not the path. The child script: create a real `QApplication`, a window with fakes installed pre-construct, stop its poll timer, keep it hidden, `QTimer.singleShot(0, app.quit)`, then `app.exec()` with a watchdog that exits non-zero if the loop outlives ~5 s. After a normal return assert: `aboutToQuit` fired, `_exit_application` was **not** called, the claim is dead, and a late stopped delivery spawns nothing. Do **not** emit `aboutToQuit` manually. |
 | 24 | `close_event_unsaved_prompt_path_keeps_the_attempt_until_confirmed` | `close_to_tray=False`; `has_unsaved_changes()` True; `QMessageBox.question` -> `Cancel`: window not closed, claim live; then `Discard`: claim dead |
-| 25 | `manual_start_from_another_window_cancels_pending_attempt` | `arm(a)`; `b.start_supervisor()`; `deliver(a, stopped)`; `a.popens` contains no `start` |
+| 25 | `manual_start_from_another_window_cancels_pending_attempt` | Both windows share one `Popen` recorder. Assert the constructor claims for A and B are in place, then `b.start_supervisor()` and immediately assert the recorder is exactly `[[b.executable, "start"]]`. Deliver A's stopped result and assert the recorder is **unchanged**: one manual Start, no additional automatic Start |
 
 ## 6. Preservation requirements
 
@@ -434,7 +485,14 @@ Numbering matches design §6. Each row's assertion is mandatory.
 
 1. `pytest` green (whole suite) in the project's `daily` env with
    `QT_QPA_PLATFORM=offscreen` (set by `conftest.py`).
-2. `grep -c "ai-backends start"` style manual check: the recorder assertion in the
-   suite proves no real spawn during ordinary window tests.
-3. Manual checks 3-6 of design §7.
+2. The autouse recorder (`§4.1`) proves no `start`/`stop` argv was spawned by any
+   test, and the fixture teardown fails the test if one was.
+2b. Assert `find_ai_backends_executable(workspace)` returns the workspace copy when
+   `<workspace>/ai-backends` exists, so tests do not silently depend on the
+   hardcoded `/home/bin/ai-backends` fallback (`supervisor.py:34`).
+3. Manual checks 3-6 of design §7. For check 6 (missing executable) a shadowed
+   `PATH` alone is insufficient because of the hardcoded `/home/bin/ai-backends`
+   fallback; use a controlled resolver result (e.g. patch
+   `find_ai_backends_executable`/`SupervisorManager.executable` to a nonexistent
+   path) rather than assuming the environment hides the script.
 4. No new dependency; `os` and `typing.ClassVar` are stdlib.
