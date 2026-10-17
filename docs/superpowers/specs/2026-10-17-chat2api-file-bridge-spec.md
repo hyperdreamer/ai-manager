@@ -274,6 +274,20 @@ class Chat2ApiServerSchema(BaseModel):
     port: Port = 8000
     auth_token_env: StrictStr | None = "CHAT2API_TOKEN"
 
+    @field_validator("host")
+    @classmethod
+    def validate_loopback_host(cls, value: str) -> str:
+        """R-HOST-LOOPBACK: exact loopback spelling, no stripping."""
+        if value in ("127.0.0.1", "::1"):
+            return value
+        if value.lower() == "localhost":
+            return value
+        raise ValueError(
+            "Host must be a loopback address (127.0.0.1, localhost, or ::1). "
+            "Binding a wildcard or external interface is not supported for "
+            "this local service."
+        )
+
     @field_validator("auth_token_env")
     @classmethod
     def validate_auth_name(cls, value: str | None) -> str | None:
@@ -1151,9 +1165,13 @@ Ordered probe algorithm:
 
 ### 7.4 R-HOST-LOOPBACK and R-HOST-CLASS
 
-**R-HOST-LOOPBACK** (stage 2, chat2api): `server.host` must be a string whose
-lowercased, whitespace-trimmed form is one of `127.0.0.1`, `localhost`, or `::1`.
-Rejection message:
+**R-HOST-LOOPBACK** (stage 2, chat2api): `server.host` must be a strict string
+that is **exactly** one of `127.0.0.1`, `localhost`, or `::1`, compared
+case-insensitively for `localhost` only. Surrounding whitespace is **not**
+stripped and is therefore rejected: a host of `" localhost "` would be written
+verbatim, forwarded to uvicorn verbatim, and produce an unusable
+`http:// localhost :8000` endpoint. The accepted value must equal the canonical
+form character for character. Rejection message:
 
 ```text
 Host must be a loopback address (127.0.0.1, localhost, or ::1). Binding a
@@ -1166,31 +1184,53 @@ to guess. Rejecting it makes the rewrite correct by construction. This rule is
 an ai-manager editor rule only; it does not modify chat2api, which still accepts
 any host in its own loader.
 
-**R-HOST-CLASS** (blast-radius matching): parse the host component of an
-`api_base` URL and compare classes, not spellings.
+**R-HOST-CLASS** (blast-radius matching): compare two URLs by **normalizing the
+host spelling only**, and by comparing everything else as exact text.
 
 ```python
-LOOPBACK_CLASS = {"127.0.0.1", "localhost", "::1"}
+LOOPBACK_CANONICAL = "127.0.0.1"
 
-def host_class(url: str) -> tuple[str, int] | None:
-    """Return (scheme, port) with the host normalized to the loopback class.
+def normalize_loopback_url(url: str) -> str | None:
+    """Return `url` with its loopback host spelling normalized to 127.0.0.1.
 
-    Returns None when the URL is unparseable or the host is not loopback.
-    Path, query, and credentials are ignored for class comparison but are
-    re-emitted untouched when the URL is rewritten.
+    Only the host component is replaced. Scheme, userinfo, port, path, query,
+    and fragment are preserved byte-for-byte. Returns None when the URL is
+    unparseable or its host is not one of the three loopback spellings.
     """
+
+def urls_match(a: str, b: str) -> bool:
+    """Exact string equality after normalize_loopback_url on both sides."""
 ```
 
-Equivalence: two URLs are class-equal when both have a non-None
-`host_class` and the `(scheme, port)` tuples match, after stripping a single
-trailing `/` from each raw string. `http://localhost:8000` therefore matches
-`http://127.0.0.1:8000`, and `http://[::1]:8000` matches both. A non-loopback
-host never matches and never participates in a rewrite. A path suffix
-(`/v1`), a different port, or a different scheme never matches.
+The whole-URL comparison is what makes path suffixes significant:
 
-When a match is rewritten, the dependent's `api_base` receives the primary's
-**saved host spelling** verbatim, not a normalized form, so the file keeps the
-user's chosen spelling.
+| `api_base` | matches `http://127.0.0.1:8000`? |
+| --- | --- |
+| `http://127.0.0.1:8000` | yes |
+| `http://127.0.0.1:8000/` | yes (single trailing `/` stripped from both before comparison) |
+| `http://localhost:8000` | yes (host class) |
+| `http://[::1]:8000` | yes (host class) |
+| `http://LOCALHOST:8000` | yes (`localhost` compared case-insensitively) |
+| `http://127.0.0.1:8000/v1` | **no** (path preserved) |
+| `http://127.0.0.1:8001` | **no** (port differs) |
+| `https://127.0.0.1:8000` | **no** (scheme differs) |
+| `http://127.0.0.1:8000/?x=1` | **no** (query preserved) |
+| `http://0.0.0.0:8000` | **no** (not loopback; cannot be saved anyway) |
+
+The trailing-slash rule is: strip **at most one** trailing `/` from each raw
+string before normalization; do not strip repeatedly and do not strip a path
+that is exactly `/` into an empty string when a query or fragment follows.
+
+When a match is rewritten, the dependent's `api_base` receives exactly
+`new_url` — the primary's newly saved base URL — rather than a reconstructed
+URL. This is the single rewrite rule and it is consistent with §5.5 step 4:
+the dependent's endpoint becomes identical to the primary's, which is what
+"points at chat2api" means. Because host normalization is comparison-only and
+never applied on write, a user who typed `localhost` keeps `localhost` in
+the chat2api file and dependents are rewritten to that saved spelling.
+
+Credentials, queries, and paths in a dependent that do not match are left
+entirely alone; they are never partially rewritten.
 
 ### 7.5 Non-default `CHAT2API_CONFIG` (recorded limitation)
 
@@ -1881,7 +1921,16 @@ Use F-C with the following complete `server` objects, keeping its models unchang
   {"host": "127.0.0.1", "port": 8000, "auth_token_env": "9BAD"},
   {"host": "127.0.0.1", "port": 8000, "auth_token_env": "_TOKEN_9"},
   {"host": "127.0.0.1", "port": 8000, "auth_token_env": null},
-  {"host": "127.0.0.1", "port": 8000}
+  {"host": "127.0.0.1", "port": 8000},
+  {"host": "localhost", "port": 8000, "auth_token_env": null},
+  {"host": "LOCALHOST", "port": 8000, "auth_token_env": null},
+  {"host": "::1", "port": 8000, "auth_token_env": null},
+  {"host": "0.0.0.0", "port": 8000, "auth_token_env": null},
+  {"host": "::", "port": 8000, "auth_token_env": null},
+  {"host": "192.0.2.5", "port": 8000, "auth_token_env": null},
+  {"host": " localhost ", "port": 8000, "auth_token_env": null},
+  {"host": "localhost\n", "port": 8000, "auth_token_env": null},
+  {"host": "127.0.0.2", "port": 8000, "auth_token_env": null}
 ]
 ```
 
@@ -2075,12 +2124,26 @@ Required cases:
 7. Dirty dependent: set grammar draft model `unsaved-model` before rewrite; after success its disk model remains `original-grammar`, saved baseline base becomes 8123, widget/draft model stays unsaved-model and draft base remains its old value; dirty stays true. Clean dependent instead reloads base 8123 and stays clean.
 8. Stale dependent after dialog: hash refusal is all-or-nothing; neither primary nor any checked dependent changes.
 9. Auth mismatch using F-AUTH/F-L variant: warning only for a named `$OTHER_TOKEN` versus named server auth; literal/empty key or disabled auth does not produce this specific warning. Warning does not edit keys or block an otherwise approved save.
-10. Ordinary URL matching strips trailing `/` and normalizes the host
-    equivalence class (§7.3): `http://127.0.0.1:8000/` matches;
-    `http://localhost:8000` matches `http://127.0.0.1:8000` (alias class);
-    `http://[::1]:8000` matches as well. `http://127.0.0.1:8000/v1` does **not**
-    match (path suffix preserved). Wildcard hosts cannot occur because
-    R-HOST-LOOPBACK rejects them at save time.
+10. URL matching uses rule R-HOST-CLASS (§7.4): strip **at most one** trailing
+    `/` from each side, then `normalize_loopback_url` both sides and require
+    exact equality. This table is normative and was executed during design
+    against `http://127.0.0.1:8000`; every row must pass:
+
+    | `api_base` | matches base? |
+    | --- | --- |
+    | `http://127.0.0.1:8000` | yes |
+    | `http://127.0.0.1:8000/` | yes |
+    | `http://localhost:8000` | yes |
+    | `http://[::1]:8000` | yes |
+    | `http://LOCALHOST:8000` | yes |
+    | `http://127.0.0.1:8000/v1` | **no** |
+    | `http://127.0.0.1:8001` | **no** |
+    | `https://127.0.0.1:8000` | **no** |
+    | `http://127.0.0.1:8000/?x=1` | **no** |
+    | `http://0.0.0.0:8000` | **no** |
+
+    Host normalization is comparison-only and is **never** applied on write;
+    the dependent receives exactly `new_url`.
 
 ### 12.6 `tests/test_structured_view.py`
 
