@@ -21,8 +21,9 @@ This feature adds **one automatic startup attempt at launch**, taken only when
    abnormal exit, spawn failure — causes no automatic action.
 3. At most one automatic attempt per process, permanently, regardless of windows,
    cancellations, failures, or later entry-point calls.
-4. Manual intent wins over a pending automatic start, from any window. After a
-   manual **Stop** the supervisor stays stopped.
+4. Manual intent wins over a **pending** automatic start, from any window: once a
+   manual Stop has been issued before the automatic spawn is attempted, that spawn
+   never happens (see Goal 5 for the bound after a spawn).
 5. The guarantee is bounded, and the bound is exactly this: **a manual Stop issued
    before the automatic spawn is attempted always wins**; a Stop issued after the
    detached `start` has been launched cannot cancel it. `ai-backends start` is an
@@ -409,7 +410,7 @@ negative expectation with a non-busy positive control in the same test.
 | 14 | `followup_probe_requested_only_after_a_successful_automatic_start` — counts refresh requests with uniform totals: success **2**, failed spawn **1**, running **1** | pins the local-result design |
 | 15 | `cancel_is_process_wide_across_managers` — `arm(A)` (probe in flight), `manager_b.stop_supervisor()`, then A's stopped delivery; A spawns nothing | per-instance cancellation lets A start |
 | 16 | `busy_probe_is_not_claimed` — fake process `Running`; entry returns `False` and `_autostart_consumed` stays `False`; then, in the same test, flip the fake to `NotRunning` and assert the entry **does** arm via `arm()` | the paired positive control makes a no-op implementation fail |
-| 17 | `another_managers_poll_cannot_consume_or_authorise_the_claim` — start B's ordinary poll and let it error, then `arm(A)` while B's poll is still in flight, deliver B's stopped result, and assert B spawned nothing **and** `arm(A)`'s claim is still live and A starts on delivery | a single global flag lets B consume A's claim |
+| 17 | `another_managers_poll_cannot_consume_or_authorise_the_claim` — put B's ordinary poll in flight and leave it there, `arm(A)`, then deliver B's stopped result while A still owns the claim, and assert B spawned nothing **and** `arm(A)`'s claim is still live and A starts on delivery | a single global flag lets B consume A's claim |
 | 18 | `status_receiver_that_stops_wins` — `arm()`, connect a `status_updated` receiver that calls `stop_supervisor()`, deliver stopped; argv is `[[exe, "stop"]]` only | cached authorisation across the emit yields `start` then `stop` |
 
 **`tests/test_main_window_autostart.py`** — must arm *for real* (patch
@@ -420,7 +421,10 @@ negative expectation with a non-busy positive control in the same test.
 | 19 | `constructor_requests_one_attempt` — class-method spy on `start_if_not_running` installed before construction (attribute lookup happens at call time); asserts one call and that the constructor did not call `refresh_status` directly | pins the wiring |
 | 20 | `quit_cancels_pending_autostart` — arm through the real entry method, assert the claim is live, call `_exit_application()`, assert the claim is dead and a later stopped delivery spawns nothing | quit-vs-hide |
 | 21 | `hiding_to_tray_keeps_pending_autostart` — same setup, `close()` with `close_to_tray`; window hidden, claim still live | the opposite contract |
-| 22 | `cancel_in_the_unsaved_changes_prompt_keeps_the_attempt` — arm, force `has_unsaved_changes()`, answer Cancel; claim still live (§3.4) | documents the chosen semantics |
+| 22 | `cancel_in_the_unsaved_changes_prompt_keeps_the_attempt` — `arm()`, force `has_unsaved_changes()`, answer Cancel to the `handle_quit` prompt; claim still live (§3.4) | documents the chosen semantics |
+| 23 | `direct_app_quit_cancels_via_about_to_quit` — `arm()`, then call `QApplication.instance().quit()` (not `_exit_application`) and process events; dispatch `aboutToQuit` and assert the claim is dead | pins the second cancellation hook, which test 20 does not cover |
+| 24 | `close_event_unsaved_prompt_path_keeps_the_attempt_until_confirmed` — `arm()`, `close_to_tray` disabled, `has_unsaved_changes()` forced true, `close()`; on Discard the exit path cancels the claim, on Cancel the claim stays live | covers the `closeEvent` prompt route (§3.4) |
+| 25 | `manual_start_from_another_window_cancels_pending_attempt` — `arm(A)`, `manager_b.start_supervisor()`, then A's stopped delivery; A spawns nothing | cross-manager manual-Start cancellation |
 
 Existing tests must keep passing unchanged, especially
 `tests/test_supervisor.py::test_stop_supervisor_runs_stop_command` (argv
