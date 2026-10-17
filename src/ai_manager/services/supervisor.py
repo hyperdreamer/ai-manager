@@ -128,16 +128,79 @@ class SupervisorManager(QObject):
             self._status_output_buffer.clear()
             self._status_process.start(self.executable, ["status"])
 
+    @staticmethod
+    def autostart_disabled() -> bool:
+        """True when the environment opts out of the automatic startup attempt."""
+        raw = os.environ.get(AUTOSTART_DISABLE_ENV)
+        if raw is None:
+            return False
+        return raw.strip().lower() in _AUTOSTART_DISABLED_VALUES
+
+    def claim_is_live(self) -> bool:
+        """True while this manager holds an uncancelled autostart claim."""
+        return (
+            self._autostart_epoch is not None
+            and self._autostart_epoch == SupervisorManager._autostart_cancel_epoch
+        )
+
+    def start_if_not_running(self) -> bool:
+        """Probe once, and start the supervisor only if it is really stopped.
+
+        Returns True when this call claimed the process-wide attempt and launched
+        a probe. Guard order matters: the busy check must precede the claim so a
+        True return always means a probe was actually issued.
+        """
+        if self.autostart_disabled():
+            return False
+        if SupervisorManager._autostart_consumed:
+            return False
+        if self._status_process.state() != QProcess.ProcessState.NotRunning:
+            return False
+        SupervisorManager._autostart_consumed = True
+        self._autostart_epoch = SupervisorManager._autostart_cancel_epoch
+        self.refresh_status()
+        return True
+
+    def cancel_pending_autostart(self) -> None:
+        """Cancel any pending automatic start, process-wide.
+
+        Advancing the shared epoch invalidates a claim held by *any* manager;
+        clearing the instance epoch also marks this manager's own claim dead.
+        The consumed flag is never restored: the attempt is one per process.
+        """
+        SupervisorManager._autostart_cancel_epoch += 1
+        self._autostart_epoch = None
+
     def _on_status_ready_read(self) -> None:
         self._status_output_buffer.extend(self._status_process.readAllStandardOutput().data())
 
     def _on_status_finished(self, exit_code: int, exit_status) -> None:
         output = self._status_output_buffer.decode("utf-8", errors="replace")
         status = parse_supervisor_status(output)
+
+        # Clear before emitting: a receiver that re-enters must not see a live
+        # claim. A non-claimant's epoch is None, so this is a no-op for it.
+        claim_epoch = self._autostart_epoch
+        self._autostart_epoch = None
+
         self.status_updated.emit(status)
 
+        authorized = (
+            exit_code == 0
+            and exit_status == QProcess.ExitStatus.NormalExit
+            and SUPERVISOR_NOT_RUNNING_RE.search(output) is not None
+            and SUPERVISOR_RUNNING_RE.search(output) is None
+        )
+        if claim_epoch != SupervisorManager._autostart_cancel_epoch:
+            return
+        if not authorized:
+            return
+        if self._spawn_supervisor("start", silent=True):
+            self.refresh_status()
+
     def _on_status_error(self, error) -> None:
-        # If QProcess fails to start or crashes, emit stopped status
+        # A probe that could not run never authorises an automatic start.
+        self._autostart_epoch = None
         status = SupervisorStatus(is_running=False, supervisor_pid=None, services={})
         self.status_updated.emit(status)
 
@@ -150,25 +213,34 @@ class SupervisorManager(QObject):
         self._current_action = f"restart {service_name}"
         self._action_process.start(self.executable, ["restart", service_name])
 
+    def _spawn_supervisor(self, command: str, *, silent: bool) -> bool:
+        """Run `ai-backends <command>` detached; return whether it was launched.
+
+        ``silent`` suppresses ``action_completed`` so an automatic attempt can
+        never raise the user-facing failure dialog for something nobody asked for.
+        """
+        action, ok_message, fail_template = self._ACTIONS[command]
+        try:
+            subprocess.Popen([self.executable, command], start_new_session=True)
+        except Exception as e:
+            if not silent:
+                self.action_completed.emit(action, False, fail_template.format(e))
+            return False
+        if not silent:
+            self.action_completed.emit(action, True, ok_message)
+        return True
+
     def start_supervisor(self) -> None:
         """Runs `ai-backends start` in the background."""
-        # ai-backends start runs in the foreground by default, so we can launch it detached
-        try:
-            subprocess.Popen([self.executable, "start"], start_new_session=True)
-            self.action_completed.emit("start_supervisor", True, "Supervisor started.")
+        self.cancel_pending_autostart()
+        if self._spawn_supervisor("start", silent=False):
             self.refresh_status()
-        except Exception as e:
-            self.action_completed.emit("start_supervisor", False, f"Failed to start supervisor: {e}")
 
     def stop_supervisor(self) -> None:
         """Runs `ai-backends stop` in the background."""
-        # ai-backends stop runs in the foreground by default, so we can launch it detached
-        try:
-            subprocess.Popen([self.executable, "stop"], start_new_session=True)
-            self.action_completed.emit("stop_supervisor", True, "Supervisor stopped.")
+        self.cancel_pending_autostart()
+        if self._spawn_supervisor("stop", silent=False):
             self.refresh_status()
-        except Exception as e:
-            self.action_completed.emit("stop_supervisor", False, f"Failed to stop supervisor: {e}")
 
     def _on_action_finished(self, exit_code: int, exit_status) -> None:
         success = exit_code == 0
