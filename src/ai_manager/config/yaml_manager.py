@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Optional
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
+from ai_manager.config.config_errors import require_llm
 from ai_manager.config.models import AppAIConfig, AppMetadata
 
 
@@ -27,6 +28,7 @@ def get_example_config_path(app_meta: AppMetadata) -> Path:
 
 def ensure_config_exists(app_meta: AppMetadata) -> Path:
     """Ensures config.yaml exists; if missing, copies from config.example.yaml."""
+    require_llm(app_meta)
     cfg_path = get_config_path(app_meta)
     if not cfg_path.exists():
         example_path = get_example_config_path(app_meta)
@@ -40,6 +42,7 @@ def ensure_config_exists(app_meta: AppMetadata) -> Path:
 
 def read_app_config(app_meta: AppMetadata) -> AppAIConfig:
     """Reads and parses an AppAIConfig from the application's config.yaml."""
+    require_llm(app_meta)
     cfg_path = ensure_config_exists(app_meta)
     yaml = _get_yaml_engine()
     with open(cfg_path, "r", encoding="utf-8") as f:
@@ -79,6 +82,7 @@ def read_app_config(app_meta: AppMetadata) -> AppAIConfig:
 
 def write_app_config(app_meta: AppMetadata, new_config: AppAIConfig) -> None:
     """Atomically updates the application's config.yaml with comment preservation."""
+    require_llm(app_meta)
     cfg_path = ensure_config_exists(app_meta)
     yaml = _get_yaml_engine()
 

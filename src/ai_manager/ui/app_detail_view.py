@@ -341,6 +341,7 @@ class AppDetailView(QWidget):
             token=self._fetch_token,
             api_base=self._base_url_edit.text().strip(),
             api_key=self._key_edit.text().strip(),
+            app_id=self.app_meta.id,
         )
         self._fetch_status_label.setText("Fetching models from provider...")
         self._fetch_status_label.setStyleSheet("font-size: 11px; color: #3b82f6;")

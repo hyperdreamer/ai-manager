@@ -1,6 +1,15 @@
-from pathlib import Path
+import pytest
+from pydantic import ValidationError
+
 from ai_manager.config.app_registry import get_managed_apps
+from ai_manager.config.config_errors import ConfigError, UnknownConfigKindError
+from ai_manager.config.models import AppAIConfig, AppMetadata
 from ai_manager.config.presets import DEFAULT_PRESETS
+from ai_manager.config.yaml_manager import (
+    ensure_config_exists,
+    read_app_config,
+    write_app_config,
+)
 
 
 def test_presets_exist():
@@ -14,10 +23,45 @@ def test_presets_exist():
 
 def test_managed_apps(tmp_path):
     apps = get_managed_apps(tmp_path)
-    assert set(apps.keys()) == {"ai-grammar", "textkit", "yt2txt"}
+    assert list(apps) == ["ai-grammar", "textkit", "yt2txt", "chat2api", "file-bridge"]
+    assert [a.config_kind for a in apps.values()] == [
+        "llm", "llm", "llm", "chat2api", "file-bridge"
+    ]
     assert "free-tts" not in apps
-    assert "file-bridge" not in apps
+    assert apps["chat2api"].relative_path == tmp_path / "chat2api"
+    assert apps["chat2api"].config_file_name == "config.json"
+    assert apps["chat2api"].example_config_file_name == "config.example.json"
+    assert apps["chat2api"].default_port == 8000
+    assert apps["file-bridge"].default_port == 8964
+    assert apps["textkit"].supports_split_models
 
-    assert apps["textkit"].supports_split_models is True
-    assert apps["ai-grammar"].supports_split_models is False
-    assert apps["yt2txt"].default_port == 8666
+
+@pytest.mark.parametrize("kind", [None, 1, "LLM", "file_bridge", "unknown"])
+def test_bad_kind_fails_closed(tmp_path, kind):
+    with pytest.raises(ValidationError, match="Unknown config_kind"):
+        AppMetadata(
+            id="x",
+            display_name="x",
+            relative_path=tmp_path,
+            default_port=1,
+            config_kind=kind,
+        )
+
+
+def test_legacy_dispatch_does_not_materialize_structured_examples(five_app_workspace):
+    apps = get_managed_apps(five_app_workspace)
+    for app_id in ("chat2api", "file-bridge"):
+        meta = apps[app_id]
+        path = meta.relative_path / meta.config_file_name
+        path.unlink()
+        for call in (
+            lambda: ensure_config_exists(meta),
+            lambda: read_app_config(meta),
+            lambda: write_app_config(meta, AppAIConfig()),
+        ):
+            with pytest.raises(ConfigError):
+                call()
+        assert not path.exists()
+    bad = apps["ai-grammar"].model_copy(update={"config_kind": "plugin-kind"})
+    with pytest.raises(UnknownConfigKindError):
+        read_app_config(bad)

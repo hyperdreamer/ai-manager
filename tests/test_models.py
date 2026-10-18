@@ -1,7 +1,10 @@
 import pytest
+from pydantic import ValidationError
+
 from ai_manager.config.models import (
     AppAIConfig,
     AppMetadata,
+    ModelFetchRequest,
     ServiceRunState,
     ServiceStatus,
     SupervisorStatus,
@@ -49,3 +52,22 @@ def test_supervisor_status_serialization():
     data = status.model_dump()
     assert data["is_running"] is True
     assert data["services"]["ai-grammar"]["pid"] == 5678
+
+
+def test_metadata_default_and_llm_equality(tmp_path):
+    assert AppMetadata(
+        id="x", display_name="x", relative_path=tmp_path, default_port=1
+    ).config_kind == "llm"
+    cfg = AppAIConfig(model="original")
+    assert cfg == cfg.model_copy(deep=True)
+    assert cfg != cfg.model_copy(update={"model": "changed"})
+
+
+@pytest.mark.parametrize("origin", [None, "", 7])
+def test_fetch_origin_is_required_and_strict(origin):
+    with pytest.raises(ValidationError):
+        ModelFetchRequest(
+            token=1, api_base="http://localhost", api_key="", app_id=origin
+        )
+    with pytest.raises(ValidationError):
+        ModelFetchRequest(token=1, api_base="http://localhost", api_key="")
