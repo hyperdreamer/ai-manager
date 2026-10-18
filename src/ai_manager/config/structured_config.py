@@ -25,6 +25,15 @@ def _check_kind(kind: object) -> None:
         raise UnknownConfigKindError(kind)
 
 
+def _parent_writable(parent: Path) -> bool:
+    try:
+        parent_mode = stat.S_IMODE(parent.stat().st_mode)
+    except OSError:
+        return False
+    writable = bool(parent_mode & 0o222) and bool(parent_mode & 0o111)
+    return writable and os.access(parent, os.W_OK | os.X_OK)
+
+
 def _snapshot(path: Path) -> tuple[Path, bytes | None, int | None, tuple[str, ...]]:
     requested = Path(os.path.abspath(path))
     try:
@@ -38,7 +47,7 @@ def _snapshot(path: Path) -> tuple[Path, bytes | None, int | None, tuple[str, ..
         try:
             info = resolved.lstat()
         except FileNotFoundError:
-            return resolved, None, None, ()
+            return resolved, None, None, () if _parent_writable(resolved.parent) else ("non-writable",)
         if stat.S_ISLNK(info.st_mode):
             raise SymlinkConfigError(requested)
         if not stat.S_ISREG(info.st_mode):
@@ -120,7 +129,7 @@ def load(kind: StructuredKind, path: Path) -> StructuredDoc:
     requested = Path(os.path.abspath(path))
     resolved, raw, mode, reasons = _snapshot(requested)
     if raw is None:
-        return StructuredDoc(kind, requested, resolved, {}, b"", None, False, None, ("missing-config",))
+        return StructuredDoc(kind, requested, resolved, {}, b"", None, False, None, ("missing-config",) + reasons)
     tree, parse_reasons = _parse_bytes(kind, requested, raw)
     return StructuredDoc(kind, requested, resolved, tree, raw, hashlib.sha256(raw).digest(), True, mode, reasons + parse_reasons)
 
@@ -135,7 +144,9 @@ def load_example(kind: StructuredKind, path: Path, example_path: Path) -> Struct
             raise FileNotFoundError(example_path)
     except Exception as exc:
         raise MissingExampleError(example_path, f"Cannot create draft from example: {example_path}") from exc
-    return replace(target, doc=copy.deepcopy(example.doc), read_only_reasons=tuple(r for r in example.read_only_reasons if r == "yaml-anchors-aliases"), create_requested=True)
+    reasons = tuple(r for r in target.read_only_reasons if r == "non-writable")
+    reasons += tuple(r for r in example.read_only_reasons if r == "yaml-anchors-aliases")
+    return replace(target, doc=copy.deepcopy(example.doc), read_only_reasons=reasons, create_requested=True)
 
 def _apply(tree, mutation: Mutation) -> None:
     parent = tree

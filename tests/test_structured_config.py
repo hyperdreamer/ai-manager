@@ -145,6 +145,79 @@ def test_readonly_anchors_and_punctuation(tmp_path):
         p.chmod(0o600)
 
 
+@pytest.mark.parametrize("parent_mode", [0o555, 0o500])
+def test_absent_target_unwritable_parent_is_not_creatable(tmp_path, parent_mode):
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    example = parent / "config.example.json"
+    example.write_text('{"models":{}}\n')
+    target = parent / "config.json"
+    parent.chmod(parent_mode)
+    try:
+        d = sc.load("chat2api", target)
+        assert not d.existed and d.raw_sha256 is None and d.mode is None
+        assert "missing-config" in d.read_only_reasons
+        assert "non-writable" in d.read_only_reasons
+        draft = sc.load_example("chat2api", target, example)
+        assert draft.create_requested and "non-writable" in draft.read_only_reasons
+        with pytest.raises(ReadOnlyConfigError):
+            sc.render("chat2api", draft)
+        assert not target.exists()
+        assert sorted(x.name for x in parent.iterdir()) == ["config.example.json"]
+    finally:
+        parent.chmod(0o755)
+
+
+def test_absent_target_nonsearchable_parent_is_not_creatable(tmp_path):
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    example = parent / "config.example.json"
+    example.write_text('{"models":{}}\n')
+    target = parent / "config.json"
+    parent.chmod(0o444)
+    try:
+        try:
+            draft = sc.load_example("chat2api", target, example)
+        except ConfigLoadError:
+            # Without the search bit the absence of the target cannot even be
+            # established, so no creatable draft may be produced.
+            assert not target.exists()
+            return
+        assert "non-writable" in draft.read_only_reasons
+        with pytest.raises(ReadOnlyConfigError):
+            sc.render("chat2api", draft)
+        assert not target.exists()
+    finally:
+        parent.chmod(0o755)
+
+
+def test_absent_target_parent_mode_bits_beat_root_access(tmp_path, monkeypatch):
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    example = parent / "config.example.json"
+    example.write_text('{"models":{}}\n')
+    target = parent / "config.json"
+    parent.chmod(0o555)
+    # A root process (or any process whose uid clears DAC) still sees os.access as
+    # true; the parent mode bits alone must keep explicit creation disabled.
+    monkeypatch.setattr(sc.os, "access", lambda *args, **kwargs: True)
+    try:
+        d = sc.load("chat2api", target)
+        assert "non-writable" in d.read_only_reasons
+        draft = sc.load_example("chat2api", target, example)
+        assert "non-writable" in draft.read_only_reasons
+        with pytest.raises(ReadOnlyConfigError):
+            sc.render("chat2api", draft)
+        assert not target.exists()
+    finally:
+        parent.chmod(0o755)
+    writable = sc.load("chat2api", target)
+    assert writable.read_only_reasons == ("missing-config",)
+    writable_draft = sc.load_example("chat2api", target, example)
+    assert not writable_draft.read_only_reasons
+    assert sc.render("chat2api", writable_draft) == b'{\n  "models": {}\n}\n'
+
+
 def test_empty_comments_and_normalized_noop(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text("# comment only\n\n")
