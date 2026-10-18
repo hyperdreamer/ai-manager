@@ -1,6 +1,11 @@
+import builtins
 import copy
 from dataclasses import replace
 import hashlib
+import os
+from pathlib import Path
+import stat
+import threading
 import pytest
 from ai_manager.config.app_registry import get_managed_apps
 from ai_manager.config.blast_radius import auth_mismatch_warning, endpoint, find_affected_dependents, normalize_loopback_url, urls_match
@@ -8,9 +13,13 @@ from ai_manager.config.config_errors import ConfigLoadError
 from ai_manager.config.models import AppAIConfig
 from ai_manager.config.structured_config import load
 from ai_manager.config.structured_models import Mutation
+from ai_manager.config.transaction import Transaction
 from ai_manager.config.yaml_manager import render_app_config
 
 BASE = "http://127.0.0.1:8000"
+# A regression that opens the non-regular leaf blocks forever; bound it so pytest fails
+# instead of hanging the suite.
+FIFO_TIMEOUT_SECONDS = 10.0
 
 
 @pytest.mark.parametrize("url,match", [(BASE, True), (BASE + "/", True), ("http://localhost:8000", True), ("http://[::1]:8000", True), ("http://LOCALHOST:8000", True), (BASE + "/v1", False), ("http://127.0.0.1:8001", False), ("https://127.0.0.1:8000", False), (BASE + "/?x=1", False), ("http://0.0.0.0:8000", False), (BASE + "///", False), ("http://user:pw@127.0.0.1:8000", False)])
@@ -110,3 +119,76 @@ def test_auth_warnings(key, auth, warn):
     assert (message is not None) is warn
     if warn:
         assert message.format(app_id="ai-grammar") == "ai-grammar uses $OTHER_TOKEN, but chat2api auth_token_env is 'CHAT2API_TOKEN'; requests may fail with HTTP 401."
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="platform provides no os.mkfifo")
+def test_non_regular_dependent_is_refused_without_read_or_mutation(five_app_workspace, monkeypatch):
+    apps, before, after = drafts(five_app_workspace)
+    path = apps["textkit"].relative_path / "config.yaml"
+    path.unlink()
+    os.mkfifo(path)
+    fifo = os.lstat(path)
+    assert stat.S_ISFIFO(fifo.st_mode)
+
+    reads: list[tuple[str, Path]] = []
+    original_read_bytes = Path.read_bytes
+    original_open = builtins.open
+
+    def spy_read_bytes(self, *args, **kwargs):
+        if os.path.abspath(self) == os.path.abspath(path):
+            reads.append(("read_bytes", Path(self)))
+        return original_read_bytes(self, *args, **kwargs)
+
+    def spy_open(file, *args, **kwargs):
+        try:
+            target = Path(os.fspath(file)) if isinstance(file, (str, bytes, os.PathLike)) else None
+        except TypeError:
+            target = None
+        if target is not None and os.path.abspath(target) == os.path.abspath(path):
+            reads.append(("open", target))
+        return original_open(file, *args, **kwargs)
+
+    mutations: list[str] = []
+
+    def record_phase(name):
+        def phase(self, *args, **kwargs):
+            mutations.append(name)
+            return None
+        return phase
+
+    outcome: list[BaseException] = []
+
+    def inspect() -> None:
+        try:
+            find_affected_dependents(apps, before, after)
+        except BaseException as exc:  # noqa: BLE001 - recorded, re-asserted below
+            outcome.append(exc)
+
+    # Scope the spies to the inspection itself, so they are already removed when the
+    # assertions below format messages (a blocked worker must not break reporting) and the
+    # autouse isolation fixture's patches are left untouched.
+    with monkeypatch.context() as patch:
+        for name in ("prepare", "backups", "stage", "replace_all", "rollback"):
+            patch.setattr(Transaction, name, record_phase(name))
+        patch.setattr(Path, "read_bytes", spy_read_bytes)
+        patch.setattr(builtins, "open", spy_open)
+        worker = threading.Thread(target=inspect, name="dependent-inspection", daemon=True)
+        worker.start()
+        worker.join(timeout=FIFO_TIMEOUT_SECONDS)
+        timed_out = worker.is_alive()
+
+    assert reads == [], f"inspection attempted to read the non-regular leaf: {reads!r}"
+    assert mutations == [], f"inspection reached a mutation phase: {mutations!r}"
+    assert not timed_out, "dependent inspection blocked on a non-regular configuration leaf"
+    assert len(outcome) == 1 and isinstance(outcome[0], ConfigLoadError), outcome
+    assert "Cannot inspect dependent configuration" in str(outcome[0])
+    # Pins the non-regular rejection specifically, so treating a FIFO as a missing file
+    # (which would raise the same wrapper) cannot satisfy this test.
+    assert "must be a regular file" in str(outcome[0])
+    assert outcome[0].__cause__ is not None
+    assert os.path.abspath(outcome[0].path) == os.path.abspath(path)
+
+    current = os.lstat(path)
+    assert stat.S_ISFIFO(current.st_mode)
+    assert (current.st_ino, current.st_mtime_ns, current.st_size) == (fifo.st_ino, fifo.st_mtime_ns, fifo.st_size)
+    assert sorted(item.name for item in path.parent.iterdir()) == ["config.example.yaml", "config.yaml"]
