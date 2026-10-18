@@ -5,6 +5,7 @@ import hashlib
 import os
 import secrets
 import stat
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
@@ -46,6 +47,7 @@ class Transaction:
         self._paths: tuple[Path, ...] = ()
         self._original: dict[Path, tuple[bytes | None, int | None]] = {}
         self._backups: dict[Path, Path] = {}
+        self._staged: dict[Path, Path] = {}
         self._locks: list[int] = []
         self._temps: set[Path] = set()
 
@@ -277,3 +279,105 @@ class Transaction:
             # create a second set of backups for already-backed-up targets.
             self._state = "failed"
             raise
+
+    def _write_temp(self, path: Path, raw: bytes, mode: int, label: str) -> Path:
+        fd, name = tempfile.mkstemp(
+            prefix=f".{path.name}.ai-manager-{label}-", suffix=".tmp", dir=path.parent
+        )
+        temp = Path(name)
+        self._temps.add(temp)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fchmod(stream.fileno(), mode)
+                os.fsync(stream.fileno())
+            return temp
+        except BaseException:
+            temp.unlink(missing_ok=True)
+            self._temps.discard(temp)
+            raise
+
+    def stage(self, rendered: dict[Path, bytes]) -> None:
+        self._require("backed-up")
+        if set(rendered) != set(self._paths) or any(
+            type(value) is not bytes for value in rendered.values()
+        ):
+            raise ValueError(
+                "Stage requires exactly the prepared paths and sealed byte values."
+            )
+        self._staged = {}
+        try:
+            for path in self._paths:
+                self._staged[path] = self._write_temp(
+                    path, rendered[path], self.original_mode(path), "stage"
+                )
+            self._state = "staged"
+        except OSError as exc:
+            self._state = "failed"
+            raise TransactionError(
+                self._report(
+                    "stage",
+                    "Could not stage configuration files; no configuration "
+                    f"files were changed. {exc}",
+                )
+            ) from exc
+
+    def replace_all(self) -> TransactionReport:
+        self._require("staged")
+        self._state = "replacing"
+        replaced: list[Path] = []
+        report = TransactionReport("replace_all", backups=self._backups.copy())
+        path = self._paths[0]
+        try:
+            for path in self._paths:
+                os.replace(self._staged[path], path)
+                replaced.append(path)
+                report.replaced = tuple(replaced)
+                self._temps.discard(self._staged[path])
+                self._fsync_dir(path.parent)
+                report.files[path] = "new"
+            report.phase, report.committed = "complete", True
+            self._state = "complete"
+            return report
+        except OSError as exc:
+            report.error = f"Configuration save failed at {path}: {exc}"
+            for untouched in self._paths:
+                if untouched not in replaced:
+                    report.files[untouched] = (
+                        "restored" if self._verify_original(untouched) else "unknown"
+                    )
+            recovered = self.rollback(report)
+            raise TransactionError(recovered) from exc
+
+    def rollback(self, report: TransactionReport) -> TransactionReport:
+        self._require("replacing")
+        self._state = "rolling-back"
+        report.phase, report.committed = "rollback", False
+        for path in reversed(report.replaced):
+            try:
+                old, mode = self._original[path]
+                if old is None:
+                    path.unlink()
+                    self._fsync_dir(path.parent)
+                else:
+                    backup = self._backups[path]
+                    restored = backup.read_bytes()
+                    if restored != old:
+                        raise OSError("Backup no longer matches the prepared bytes.")
+                    temp = self._write_temp(path, restored, mode, "restore")
+                    os.replace(temp, path)
+                    self._temps.discard(temp)
+                    self._fsync_dir(path.parent)
+                if not self._verify_original(path):
+                    raise OSError("Restoration could not be verified.")
+                report.files[path] = "restored"
+            except Exception as exc:
+                report.files[path] = "unknown"
+                report.restore_failures[path] = str(exc)
+        for path in self._paths:
+            report.files.setdefault(
+                path, "restored" if self._verify_original(path) else "unknown"
+            )
+        self._state = "failed"
+        return report

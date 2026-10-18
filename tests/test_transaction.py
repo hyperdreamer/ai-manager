@@ -347,3 +347,172 @@ def test_interrupted_unlock_is_retried(tmp_path, monkeypatch):
     for p in paths:
         with open(str(p) + ".lock", "r+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+@pytest.mark.parametrize("dependent_count", [0, 1, 3])
+def test_sealed_stage_and_sorted_replace(tmp_path, dependent_count, monkeypatch):
+    paths = files(tmp_path, dependent_count + 1)
+    old = {p: p.read_bytes() for p in paths}
+    new = {p: b"new-" + p.name.encode() for p in paths}
+    replacements = []
+    original = tm.os.replace
+    def spy(src, dst):
+        replacements.append(Path(dst))
+        return original(src, dst)
+    monkeypatch.setattr(tm.os, "replace", spy)
+    with tm.Transaction() as tx:
+        tx.prepare(list(reversed(paths)), {p: digest(p) for p in paths})
+        tx.backups()
+        tx.stage(new)
+        assert {p: p.read_bytes() for p in paths} == old
+        assert all(t.parent == tmp_path and t.name.startswith(".") for t in tx._temps)
+        report = tx.replace_all()
+    assert replacements == sorted(paths, key=str)
+    assert report.committed and report.phase == "complete"
+    assert report.files == {p: "new" for p in paths}
+    assert {p: p.read_bytes() for p in paths} == new
+    assert all(stat.S_IMODE(p.lstat().st_mode) == 0o640 for p in paths)
+    assert all(b.read_bytes() == old[p] for p, b in report.backups.items())
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("phase", ["stage", "replace", "parent-fsync", "restore"])
+def test_fault_reports_real_bytes_modes_and_all_paths(tmp_path, monkeypatch, phase):
+    paths = files(tmp_path, 3)
+    old = {p: (p.read_bytes(), stat.S_IMODE(p.lstat().st_mode)) for p in paths}
+    original_replace = tm.os.replace
+    with pytest.raises(TransactionError) as err:
+        with tm.Transaction() as tx:
+            tx.prepare(paths, {p: digest(p) for p in paths})
+            tx.backups()
+            replaced, restore_order = [], []
+            original_temp, original_sync = tx._write_temp, tx._fsync_dir
+            def temporary(path, raw, mode, label):
+                if phase == "stage" and path == paths[1] and label == "stage":
+                    raise OSError("fixture stage failure")
+                return original_temp(path, raw, mode, label)
+            def replace_file(src, dst):
+                label = "restore" if "restore" in str(src) else "stage"
+                dst = Path(dst)
+                if label == "stage" and dst == paths[2] and phase in ("replace", "restore"):
+                    raise OSError("fixture replace failure")
+                if label == "restore":
+                    restore_order.append(dst)
+                    if phase == "restore" and dst == paths[1]:
+                        raise OSError("fixture restore failure")
+                result = original_replace(src, dst)
+                if label == "stage":
+                    replaced.append(dst)
+                return result
+            sync_failed = False
+            def sync(parent):
+                nonlocal sync_failed
+                if phase == "parent-fsync" and replaced and not sync_failed:
+                    sync_failed = True
+                    raise OSError("fixture directory fsync failure")
+                return original_sync(parent)
+            monkeypatch.setattr(tx, "_write_temp", temporary)
+            monkeypatch.setattr(tx, "_fsync_dir", sync)
+            monkeypatch.setattr(tm.os, "replace", replace_file)
+            tx.stage({p: b"new" for p in paths})
+            tx.replace_all()
+    report = err.value.report
+    assert not report.committed and set(report.files) == set(paths)
+    if phase == "stage":
+        assert replaced == [] and report.phase == "stage"
+    else:
+        assert report.phase == "rollback"
+        assert restore_order == list(reversed(replaced))
+        if phase == "parent-fsync":
+            assert replaced == [paths[0]]
+    if phase == "restore":
+        assert report.files[paths[1]] == "unknown"
+        assert paths[1] in report.restore_failures
+        assert p_original(paths[0]) == old[paths[0]] and p_original(paths[2]) == old[paths[2]]
+    else:
+        assert report.files == {p: "restored" for p in paths}
+        assert {p: p_original(p) for p in paths} == old
+    assert not list(tmp_path.glob(".*.tmp"))
+    assert all(b.exists() for b in report.backups.values())
+
+
+def p_original(path):
+    return path.read_bytes(), stat.S_IMODE(path.lstat().st_mode)
+
+
+def test_explicit_create_mode_and_rollback_to_absence(tmp_path, monkeypatch):
+    created = tmp_path / "0.json"
+    other = files(tmp_path, 1)[0]
+    old = other.read_bytes()
+    original = tm.os.replace
+    def fail(src, dst):
+        if Path(dst) == other and "stage" in str(src):
+            raise OSError("fixture later replace failure")
+        return original(src, dst)
+    monkeypatch.setattr(tm.os, "replace", fail)
+    with pytest.raises(TransactionError) as err:
+        with tm.Transaction() as tx:
+            tx.prepare([other, created], {created: None, other: digest(other)})
+            tx.backups()
+            tx.stage({created: b"{}\n", other: b"new"})
+            assert tx.original_mode(created) == 0o600
+            tx.replace_all()
+    assert not created.exists() and other.read_bytes() == old
+    assert err.value.report.files[created] == "restored"
+    assert created not in err.value.report.backups
+    monkeypatch.setattr(tm.os, "replace", original)
+    with tm.Transaction() as tx:
+        tx.prepare([created], {created: None})
+        tx.backups()
+        tx.stage({created: b"{}\n"})
+        assert tx.replace_all().committed
+    assert stat.S_IMODE(created.lstat().st_mode) == 0o600
+
+
+def test_invalid_phase_and_key_sets_write_nothing(tmp_path):
+    p = files(tmp_path, 1)[0]
+    with tm.Transaction() as tx:
+        with pytest.raises(ValueError):
+            tx.stage({p: b"bad"})
+        with pytest.raises(ValueError):
+            tx.prepare([p], {})
+        tx.prepare([p], {p: digest(p)})
+        with pytest.raises(ValueError):
+            tx.prepare([p], {p: digest(p)})
+        tx.backups()
+        with pytest.raises(ValueError):
+            tx.stage({})
+        assert p.read_bytes() == b"old-0\n"
+
+
+def test_two_processes_reverse_input_order_finish_or_refuse_stale(tmp_path):
+    paths = files(tmp_path)
+    ctx = multiprocessing.get_context("fork")
+    start, out = ctx.Event(), ctx.Queue()
+    expected = {p: digest(p) for p in paths}
+    def writer(order, value):
+        start.wait(2)
+        try:
+            with tm.Transaction() as tx:
+                tx.prepare(order, expected)
+                tx.backups()
+                tx.stage({p: value for p in order})
+                tx.replace_all()
+            out.put("saved")
+        except StaleDocumentError:
+            out.put("stale")
+    children = [ctx.Process(target=writer, args=(paths, b"first")), ctx.Process(target=writer, args=(list(reversed(paths)), b"second"))]
+    try:
+        for child in children:
+            child.start()
+        start.set()
+        for child in children:
+            child.join(4)
+            assert child.exitcode == 0
+        assert sorted([out.get(timeout=1), out.get(timeout=1)]) == ["saved", "stale"]
+        assert len({p.read_bytes() for p in paths}) == 1
+    finally:
+        for child in children:
+            if child.is_alive():
+                child.terminate()
+                child.join(2)
