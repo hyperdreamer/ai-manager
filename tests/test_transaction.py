@@ -82,8 +82,10 @@ def test_backups_exclusive_collision_and_order(tmp_path, monkeypatch):
     monkeypatch.setattr(tm.os, "getpid", lambda: 4321)
     nonces = iter(["a1b2c3", "a1b2c3", "d4e5f6", "a1b2c3", "d4e5f6", "abcdef"])
     monkeypatch.setattr(tm.secrets, "token_hex", lambda n: next(nonces))
-    flags_seen, locks_seen = [], []
-    original_open, original_flock = tm.os.open, tm.fcntl.flock
+    flags_seen, locks_seen, fsyncs_seen = [], [], []
+    original_open, original_flock, original_fsync = (
+        tm.os.open, tm.fcntl.flock, tm.os.fsync
+    )
     def opened(path, flags, mode=0o777):
         flags_seen.append((str(path), flags))
         return original_open(path, flags, mode)
@@ -91,8 +93,12 @@ def test_backups_exclusive_collision_and_order(tmp_path, monkeypatch):
         if op == fcntl.LOCK_EX:
             locks_seen.append(Path(os.readlink(f"/proc/self/fd/{fd}")))
         return original_flock(fd, op)
+    def synced(fd):
+        fsyncs_seen.append(Path(os.readlink(f"/proc/self/fd/{fd}")))
+        return original_fsync(fd)
     monkeypatch.setattr(tm.os, "open", opened)
     monkeypatch.setattr(tm.fcntl, "flock", locked)
+    monkeypatch.setattr(tm.os, "fsync", synced)
     with tm.Transaction() as tx:
         tx.prepare(list(reversed(paths)), {p: digest(p) for p in paths})
         tx.backups()
@@ -110,6 +116,13 @@ def test_backups_exclusive_collision_and_order(tmp_path, monkeypatch):
     assert all(flags & os.O_EXCL for name, flags in flags_seen if name.endswith(".bak"))
     assert all(flags & os.O_NOFOLLOW for name, flags in flags_seen if name.endswith(".lock"))
     assert first[paths[0]].name == "0.yaml.20261017T160734123456Z.4321-a1b2c3.bak"
+    # Every backup descriptor is fsynced and immediately followed by its parent
+    # directory fsync: three completed backups, six durability calls in total.
+    assert len(fsyncs_seen) == 6
+    assert all(
+        backup.suffix == ".bak" and parent == tmp_path.resolve()
+        for backup, parent in zip(fsyncs_seen[::2], fsyncs_seen[1::2])
+    )
 
 
 def test_backup_failure_keeps_targets_and_completed_backup(tmp_path, monkeypatch):
@@ -129,6 +142,56 @@ def test_backup_failure_keeps_targets_and_completed_backup(tmp_path, monkeypatch
     assert set(err.value.report.files.values()) == {"restored"}
     assert len(err.value.report.backups) == 1
     assert {p: (p.read_bytes(), stat.S_IMODE(p.lstat().st_mode)) for p in paths} == old
+
+
+def test_backup_fsyncs_descriptor_before_parent_directory(tmp_path, monkeypatch):
+    paths = files(tmp_path)
+    root = tmp_path.resolve()
+    original_fsync = tm.os.fsync
+    order = []
+    def fsync(fd):
+        order.append(Path(os.readlink(f"/proc/self/fd/{fd}")))
+        return original_fsync(fd)
+    monkeypatch.setattr(tm.os, "fsync", fsync)
+    with tm.Transaction() as tx:
+        tx.prepare(paths, {p: digest(p) for p in paths})
+        tx.backups()
+        created = list(tx._backups.values())
+    assert order == [created[0], root, created[1], root]
+    assert all(name.suffix == ".bak" for name in order[::2])
+    assert all(name.suffix != ".bak" for name in order[1::2])
+
+
+@pytest.mark.parametrize("failing", ["backup-file", "parent-directory"])
+def test_backup_fsync_failure_aborts_targets_and_releases_locks(
+    tmp_path, monkeypatch, failing
+):
+    paths = files(tmp_path)
+    root = tmp_path.resolve()
+    old = {p: (p.read_bytes(), stat.S_IMODE(p.lstat().st_mode)) for p in paths}
+    original_fsync = tm.os.fsync
+    injected = []
+    def fsync(fd):
+        name = Path(os.readlink(f"/proc/self/fd/{fd}"))
+        matches = name.suffix == ".bak" if failing == "backup-file" else name == root
+        if matches and not injected:
+            injected.append(name)
+            raise OSError(5, "fixture fsync failure")
+        return original_fsync(fd)
+    monkeypatch.setattr(tm.os, "fsync", fsync)
+    with pytest.raises(TransactionError) as err:
+        with tm.Transaction() as tx:
+            tx.prepare(paths, {p: digest(p) for p in paths})
+            tx.backups()
+    assert injected
+    assert err.value.report.phase == "backups"
+    assert err.value.report.backups == {}
+    assert set(err.value.report.files.values()) == {"restored"}
+    assert {p: (p.read_bytes(), stat.S_IMODE(p.lstat().st_mode)) for p in paths} == old
+    assert not list(tmp_path.glob("*.bak"))
+    for p in paths:
+        with open(str(p) + ".lock", "r+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def test_sidecar_identity_survives_target_inode_replace(tmp_path):
@@ -223,3 +286,64 @@ def test_non_regular_leaf_is_rejected(tmp_path):
         with tm.Transaction() as tx:
             tx.prepare([directory], {directory: None})
     assert not list(tmp_path.glob("*.lock"))
+
+
+@pytest.mark.parametrize("failing", ["unlock", "close"])
+def test_release_attempts_every_descriptor_after_one_failure(
+    tmp_path, monkeypatch, failing
+):
+    paths = files(tmp_path, 3)
+    original_flock, original_close = tm.fcntl.flock, tm.os.close
+    attempted, injected = [], []
+    def locked(fd, op):
+        if op == fcntl.LOCK_UN:
+            name = Path(os.readlink(f"/proc/self/fd/{fd}"))
+            attempted.append(name)
+            if failing == "unlock" and not injected:
+                injected.append(name)
+                raise OSError(5, "fixture unlock failure")
+        return original_flock(fd, op)
+    def closed(fd):
+        name = Path(os.readlink(f"/proc/self/fd/{fd}"))
+        if failing == "close" and name.name.endswith(".lock") and not injected:
+            injected.append(name)
+            raise OSError(5, "fixture close failure")
+        return original_close(fd)
+    monkeypatch.setattr(tm.fcntl, "flock", locked)
+    monkeypatch.setattr(tm.os, "close", closed)
+    tx = tm.Transaction()
+    with pytest.raises(OSError, match=f"fixture {failing} failure"):
+        with tx:
+            tx.prepare(paths, {p: digest(p) for p in paths})
+    assert sorted(attempted) == sorted(Path(str(p) + ".lock") for p in paths)
+    assert len(injected) == 1
+    assert tx._locks == [] and tx._entered is False and tx._state == "closed"
+    for p in paths:
+        with open(str(p) + ".lock", "r+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def test_interrupted_unlock_is_retried(tmp_path, monkeypatch):
+    paths = files(tmp_path)
+    original_flock = tm.fcntl.flock
+    attempted, interrupted = [], []
+    def locked(fd, op):
+        if op == fcntl.LOCK_UN:
+            attempted.append(Path(os.readlink(f"/proc/self/fd/{fd}")))
+            if not interrupted:
+                interrupted.append(fd)
+                raise InterruptedError(4, "Interrupted system call")
+        return original_flock(fd, op)
+    monkeypatch.setattr(tm.fcntl, "flock", locked)
+    with tm.Transaction() as tx:
+        tx.prepare(paths, {p: digest(p) for p in paths})
+    assert interrupted
+    expected = sorted(Path(str(p) + ".lock") for p in paths)
+    # The interrupted descriptor is attempted twice, then unlocked for real; the
+    # remaining descriptors are still visited exactly once.
+    assert sorted(set(attempted)) == expected
+    assert len(attempted) == len(expected) + 1
+    assert tx._locks == [] and tx._state == "closed"
+    for p in paths:
+        with open(str(p) + ".lock", "r+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

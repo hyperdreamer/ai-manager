@@ -56,12 +56,34 @@ class Transaction:
         return self
 
     def _release(self) -> None:
+        """Unlock and close every descriptor, even if one of them fails.
+
+        An individual unlock or close failure must not strand the remaining
+        sidecar locks for the process lifetime, so failures are collected while
+        the loop keeps draining ``_locks``. The first failure is re-raised only
+        after every descriptor has been unlocked and closed.
+        """
+        first_error: BaseException | None = None
         while self._locks:
             fd = self._locks.pop()
             try:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        break
+                    except InterruptedError:
+                        continue
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
             finally:
-                os.close(fd)
+                try:
+                    os.close(fd)
+                except BaseException as exc:
+                    if first_error is None:
+                        first_error = exc
+        if first_error is not None:
+            raise first_error
 
     def __exit__(
         self,
@@ -69,6 +91,7 @@ class Transaction:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> bool:
+        cleanup_error: BaseException | None = None
         try:
             for path in tuple(self._temps):
                 try:
@@ -78,10 +101,20 @@ class Transaction:
                     # depends on deletion.
                     pass
                 self._temps.discard(path)
+        except BaseException as exc:
+            cleanup_error = exc
         finally:
-            self._release()
-            self._entered = False
-            self._state = "closed"
+            try:
+                self._release()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+            finally:
+                # Context state is finalized before any cleanup error escapes.
+                self._entered = False
+                self._state = "closed"
+        if cleanup_error is not None:
+            raise cleanup_error
         return False
 
     def _require(self, state: str) -> None:
@@ -146,7 +179,12 @@ class Transaction:
                 self._original[path] = (raw, mode)
             self._state = "prepared"
         except BaseException:
-            self._release()
+            try:
+                self._release()
+            except BaseException:
+                # The primary prepare failure is the meaningful error; every
+                # descriptor was still unlocked and closed above.
+                pass
             self._state = "failed"
             raise
 
