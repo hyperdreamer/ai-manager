@@ -105,14 +105,17 @@ def probe_launcher(app_dir: Path, *, timeout_s: float = TIMEOUT_S) -> LauncherPr
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        # The launcher may have explained itself before hanging, so keep what it
-        # captured instead of discarding the diagnostics.
+        # The launcher may have explained itself on stderr before hanging, so keep
+        # that instead of discarding the diagnostics. Standard output is kept in
+        # the result for inspection but never explains the timeout: a printed
+        # listener answer describes what the launcher *would* serve, not why the
+        # probe gave up.
         timeout_message = (
             f"Launcher capability check timed out after {timeout_s:g} seconds."
         )
         captured_stdout = _text(exc.stdout)
         captured_stderr = _text(exc.stderr)
-        detail = (captured_stderr or captured_stdout or "").strip() or timeout_message
+        detail = captured_stderr.strip() or timeout_message
         return LauncherProbeResult(
             passed=False,
             detail=detail,

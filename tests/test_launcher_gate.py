@@ -235,6 +235,37 @@ def test_timeout_decodes_byte_streams_before_returning_them(tmp_path, monkeypatc
     assert result.stderr == "byte-level timeout diagnostic\n"
 
 
+def test_timeout_never_reports_stdout_instead_of_the_timeout(tmp_path, monkeypatch):
+    """F-3: a listener-looking stdout must never explain a timeout.
+
+    Only stderr may become ``detail``. When the launcher printed a valid
+    listener answer and then hung, the probe still timed out; reporting the
+    answer as the failure reason would hide that fact.
+    """
+    _write_launcher(tmp_path, OK_OUTPUT)
+
+    class _StdoutOnlyTimeoutSubprocess:
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        def run(self, *args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd=args[0],
+                timeout=kwargs["timeout"],
+                output="127.0.0.1\n8123\n",
+                stderr="",
+            )
+
+    monkeypatch.setattr(launcher_gate, "subprocess", _StdoutOnlyTimeoutSubprocess())
+
+    result = probe_launcher(tmp_path, timeout_s=2.0)
+
+    assert result.passed is False
+    assert result.detail == "Launcher capability check timed out after 2 seconds."
+    assert result.stdout == "127.0.0.1\n8123\n"
+    assert result.stderr == ""
+    assert result.returncode is None
+
+
 @pytest.mark.parametrize("stderr", ["", "   \n"])
 def test_timeout_falls_back_to_the_timeout_message_without_stderr(tmp_path, monkeypatch, stderr):
     """F-1: the generic message is the fallback, not the only detail."""
