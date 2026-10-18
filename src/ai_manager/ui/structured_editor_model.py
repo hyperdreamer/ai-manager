@@ -14,6 +14,7 @@ from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, replace
 from typing import Any
 
+from ai_manager.config.config_errors import ConfigValidationError
 from ai_manager.config.structured_config import _apply, _json_object
 from ai_manager.config.structured_models import FieldIssue, Mutation, StructuredDoc
 from ai_manager.config.structured_schema import PROVIDER_OPTIONS, SECRET_OPTION_KEYS
@@ -22,6 +23,9 @@ _MISSING = object()
 
 EMPTY_NAME_MESSAGE = "Model names must be non-empty strings."
 DUPLICATE_NAME_MESSAGE = "Model names must be unique."
+MODEL_ADDRESS_MESSAGE = (
+    "A model edit must address one field inside exactly one model route."
+)
 
 
 def _equal(left: Any, right: Any) -> bool:
@@ -46,15 +50,50 @@ def _diff(before: Mapping[str, Any], after: Mapping[str, Any], prefix: tuple[str
         if key not in after:
             edits.append(Mutation(prefix + (key,), "delete"))
     for key, value in after.items():
-        if key not in before:
-            edits.append(Mutation(prefix + (key,), "set", copy.deepcopy(value)))
-            continue
-        previous = before[key]
+        previous = before[key] if key in before else _MISSING
         if isinstance(previous, Mapping) and isinstance(value, Mapping):
             edits.extend(_diff(previous, value, prefix + (key,)))
-        elif not _equal(previous, value):
+        elif isinstance(value, Mapping) and previous is _MISSING and value:
+            # An absent parent is created to reach explicitly addressed
+            # descendants only; the parent itself is not written along the way.
+            edits.extend(_diff({}, value, prefix + (key,)))
+        elif previous is _MISSING or not _equal(previous, value):
             edits.append(Mutation(prefix + (key,), "set", copy.deepcopy(value)))
     return edits
+
+
+def _exists(tree: Mapping[str, Any], address: tuple[str, ...]) -> bool:
+    """Whether ``address`` is present in ``tree``, including an empty mapping."""
+    node: Any = tree
+    for key in address:
+        if not isinstance(node, Mapping) or key not in node:
+            return False
+        node = node[key]
+    return True
+
+
+def _prune_empty(
+    reference: Mapping[str, Any], tree: MutableMapping[str, Any], address: tuple[str, ...]
+) -> None:
+    """Drop containers that ``reference`` never had and that editing emptied.
+
+    ``_apply`` creates missing intermediate mappings only to reach an addressed
+    descendant. Reverting that edit must not leave an empty container behind,
+    so every newly created container on the way to ``address`` disappears again
+    once it is empty. Loaded containers are never pruned, even when empty.
+    """
+    chain: list[tuple[MutableMapping[str, Any], str, tuple[str, ...]]] = []
+    node: Any = tree
+    for index, key in enumerate(address):
+        if not isinstance(node, MutableMapping) or key not in node:
+            return
+        if not isinstance(node[key], MutableMapping):
+            return
+        chain.append((node, key, address[: index + 1]))
+        node = node[key]
+    for parent, key, prefix in reversed(chain):
+        if not parent.get(key) and not _exists(reference, prefix):
+            parent.pop(key, None)
 
 
 def _option_edits(
@@ -151,7 +190,20 @@ class StructuredEditorModel:
     # -- fields and options ---------------------------------------------------
 
     def set_field(self, address: tuple[str, ...], *, present: bool, value: Any = None) -> None:
-        _apply(self.tree, Mutation(address, "set" if present else "delete", value))
+        path = tuple(address)
+        row, remainder = self._route_address(path)
+        if row is None:
+            _apply(self.tree, Mutation(path, "set" if present else "delete", value))
+            if not present:
+                _prune_empty(self.baseline.doc, self.tree, path[:-1])
+            return
+        # A model-addressed field belongs to the row that owns the route, so the
+        # edit reaches ``draft()`` instead of changing only the shadow tree.
+        if present:
+            _apply(row.route, Mutation(remainder, "set", value))
+            return
+        _apply(row.route, Mutation(remainder, "delete"))
+        _prune_empty(self._original_route(row), row.route, remainder[:-1])
 
     def set_option(
         self, row_id: int, key: str, *, present: bool, value: Any = None
@@ -180,23 +232,15 @@ class StructuredEditorModel:
             protected = self._protected_keys(row)
             if raw is not None and not protected.intersection(raw):
                 # Fold the edited raw area back into the route exactly as
-                # ``effective_mutations`` would: the raw area is the complete
-                # replacement of the non-protected options, while known and
-                # secret option values are kept untouched. The raw area can then
-                # be reclassified against the new provider without rewriting a
-                # value. Text that would collide with a newly protected key is
-                # retained so the collision stays a visible field error.
-                options = row.route.get("options")
-                folded = dict(options) if isinstance(options, Mapping) else {}
-                for key in [key for key in folded if key not in protected]:
-                    if key not in raw:
-                        del folded[key]
-                for key, value in raw.items():
-                    folded[key] = copy.deepcopy(value)
-                if folded or "options" in self._original_route(row):
-                    row.route["options"] = folded
-                else:
-                    row.route.pop("options", None)
+                # ``effective_mutations`` would, then reclassify it against the
+                # new provider without rewriting a value. Text that would
+                # collide with a newly protected key is retained so the
+                # collision stays a visible field error.
+                folded = self._effective_route(row)
+                if not folded.get("options") and "options" not in self._original_route(row):
+                    folded.pop("options", None)
+                row.route.clear()
+                row.route.update(folded)
                 row.raw_text = None
         row.route["provider"] = provider
 
@@ -243,12 +287,13 @@ class StructuredEditorModel:
                 # no parent/child mutation pair is emitted for them.
                 continue
             address = ("models", row.name)
+            route = self._effective_route(row)
             if row.original_name == row.name:
                 mutations.extend(
-                    _option_edits(self._original_route(row), row.route, address)
+                    _option_edits(self._original_route(row), route, address)
                 )
             else:
-                mutations.append(Mutation(address, "set", copy.deepcopy(row.route)))
+                mutations.append(Mutation(address, "set", copy.deepcopy(route)))
         raw_edits = {
             row.name: row.raw_text for row in self.rows if row.raw_text is not None
         }
@@ -276,6 +321,45 @@ class StructuredEditorModel:
             else:
                 claimed.add(row.name)
         return claimed, issues
+
+    def _route_address(
+        self, address: tuple[str, ...]
+    ) -> tuple[ModelRow | None, tuple[str, ...]]:
+        """Map a model-addressed field to its owning row and route-relative path."""
+        if self.baseline.kind != "chat2api" or not address or address[0] != "models":
+            return None, address
+        matches = [row for row in self.rows if len(address) > 1 and row.name == address[1]]
+        if len(address) < 3 or len(matches) != 1:
+            # Refuse an address that cannot reach exactly one owned route instead
+            # of writing a change that ``draft()`` would silently discard.
+            raise ConfigValidationError((FieldIssue(address, MODEL_ADDRESS_MESSAGE),))
+        return matches[0], address[2:]
+
+    def _effective_route(self, row: ModelRow) -> dict[str, Any]:
+        """``row.route`` with its pending raw text applied as a render applies it.
+
+        The draft must describe the route the renderer will produce. Pending raw
+        text is a per-key replacement of the non-protected options, so applying
+        it here keeps a later raw edit from overlapping a descendant mutation
+        retained from the route before that edit.
+        """
+        route = dict(row.route)
+        if row.raw_text is None:
+            return route
+        raw = self._parse_raw(row.raw_text)
+        if raw is None:
+            # Invalid text stays a visible field issue and changes no value.
+            return route
+        protected = self._protected_keys(row)
+        options = route.get("options")
+        folded = dict(options) if isinstance(options, Mapping) else {}
+        for key in [key for key in folded if key not in protected and key not in raw]:
+            del folded[key]
+        for key, value in raw.items():
+            folded[key] = copy.deepcopy(value)
+        if folded or "options" in route:
+            route["options"] = folded
+        return route
 
     def _original_route(self, row: ModelRow) -> Mapping[str, Any]:
         if row.original_name is None:
