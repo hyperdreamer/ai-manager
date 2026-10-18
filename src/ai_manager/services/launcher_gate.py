@@ -53,10 +53,25 @@ def _parse_listener(stdout: str) -> tuple[str, int] | None:
         return None
     if not (raw_port.isascii() and raw_port.isdigit()):
         return None
-    port = int(raw_port)
+    try:
+        port = int(raw_port)
+    except ValueError:
+        # A very long digit string is still just an invalid answer: ``int()``
+        # refuses conversions beyond the interpreter's digit limit, and that
+        # must not escape the failed-result contract.
+        return None
     if not 1 <= port <= 65535:
         return None
     return host, port
+
+
+def _text(value: str | bytes | None) -> str:
+    """Return a timeout payload as text, decoding bytes if the call yielded them."""
+    if not value:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value
 
 
 def probe_launcher(app_dir: Path, *, timeout_s: float = TIMEOUT_S) -> LauncherProbeResult:
@@ -89,10 +104,20 @@ def probe_launcher(app_dir: Path, *, timeout_s: float = TIMEOUT_S) -> LauncherPr
             shell=False,
             check=False,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        # The launcher may have explained itself before hanging, so keep what it
+        # captured instead of discarding the diagnostics.
+        timeout_message = (
+            f"Launcher capability check timed out after {timeout_s:g} seconds."
+        )
+        captured_stdout = _text(exc.stdout)
+        captured_stderr = _text(exc.stderr)
+        detail = (captured_stderr or captured_stdout or "").strip() or timeout_message
         return LauncherProbeResult(
             passed=False,
-            detail=f"Launcher capability check timed out after {timeout_s:g} seconds.",
+            detail=detail,
+            stdout=captured_stdout,
+            stderr=captured_stderr,
         )
     except OSError as exc:
         return LauncherProbeResult(

@@ -127,6 +127,29 @@ def test_rejects_out_of_range_or_malformed_port(tmp_path, port):
     assert probe_launcher(tmp_path).passed is False, port
 
 
+def test_overlong_numeric_port_is_a_failure_not_a_crash(tmp_path):
+    """F-2: a digit-only port longer than int()'s limit is still just invalid.
+
+    ``str.isdigit()`` accepts 4301 nines, but ``int()`` refuses to convert that
+    many digits, so the port check has to absorb ``ValueError`` instead of
+    letting it escape the failed-result contract.
+    """
+    overlong_port = "9" * 4301
+    _write_launcher(
+        tmp_path,
+        f'printf "127.0.0.1\\n{overlong_port}\\n"\n'
+        'echo "launcher listener check: port out of range" >&2\n',
+    )
+
+    result = probe_launcher(tmp_path)
+
+    assert result.passed is False
+    assert result.detail == "launcher listener check: port out of range"
+    assert result.stderr == "launcher listener check: port out of range\n"
+    assert result.stdout == f"127.0.0.1\n{overlong_port}\n"
+    assert result.returncode == 0
+
+
 def test_nonzero_exit_fails_even_with_a_valid_two_line_answer(tmp_path):
     _write_launcher(tmp_path, 'printf "127.0.0.1\\n8123\\n"\necho "partial failure" >&2\nexit 3\n')
     result = probe_launcher(tmp_path)
@@ -171,6 +194,66 @@ def test_timeout_is_a_failure(tmp_path):
     assert result.passed is False
     assert "timed out" in result.detail.lower()
     assert elapsed < 10, "the gate must give up at its own deadline"
+
+
+def test_timeout_preserves_the_launchers_captured_diagnostics(tmp_path):
+    """F-1: a launcher that explains itself before hanging keeps its message."""
+    _write_launcher(
+        tmp_path,
+        'echo "captured timeout diagnostic" >&2\n'
+        "exec sleep 30\n",
+    )
+    result = probe_launcher(tmp_path, timeout_s=1.0)
+    assert result.passed is False
+    assert "captured timeout diagnostic" in result.detail
+    assert "captured timeout diagnostic" in result.stderr
+    assert result.returncode is None
+
+
+def test_timeout_decodes_byte_streams_before_returning_them(tmp_path, monkeypatch):
+    """F-1: captured output may arrive as bytes even for a text-mode call."""
+    _write_launcher(tmp_path, OK_OUTPUT)
+
+    class _TimingOutSubprocess:
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        def run(self, *args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd=args[0],
+                timeout=kwargs["timeout"],
+                output=b"127.0.0.1\n8123\n",
+                stderr=b"byte-level timeout diagnostic\n",
+            )
+
+    monkeypatch.setattr(launcher_gate, "subprocess", _TimingOutSubprocess())
+
+    result = probe_launcher(tmp_path, timeout_s=0.5)
+
+    assert result.passed is False
+    assert result.detail == "byte-level timeout diagnostic"
+    assert result.stdout == "127.0.0.1\n8123\n"
+    assert result.stderr == "byte-level timeout diagnostic\n"
+
+
+@pytest.mark.parametrize("stderr", ["", "   \n"])
+def test_timeout_falls_back_to_the_timeout_message_without_stderr(tmp_path, monkeypatch, stderr):
+    """F-1: the generic message is the fallback, not the only detail."""
+    _write_launcher(tmp_path, OK_OUTPUT)
+
+    class _SilentTimeoutSubprocess:
+        TimeoutExpired = subprocess.TimeoutExpired
+
+        def run(self, *args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd=args[0], timeout=kwargs["timeout"], output="", stderr=stderr
+            )
+
+    monkeypatch.setattr(launcher_gate, "subprocess", _SilentTimeoutSubprocess())
+
+    result = probe_launcher(tmp_path, timeout_s=4.0)
+
+    assert result.passed is False
+    assert result.detail == "Launcher capability check timed out after 4 seconds."
 
 
 def test_missing_launcher_is_a_failure(tmp_path):
