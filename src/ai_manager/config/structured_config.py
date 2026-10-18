@@ -10,12 +10,16 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.error import YAMLError
 from ruamel.yaml.tokens import AnchorToken, AliasToken
 from ai_manager.config.config_errors import (
-    ConfigLoadError, ConfigShapeError, ConfigValidationError, MissingExampleError,
+    ConfigError, ConfigLoadError, ConfigShapeError, ConfigValidationError, MissingExampleError,
     ReadOnlyConfigError, StaleDocumentError, SymlinkConfigError, UnknownConfigKindError,
+    require_llm,
 )
-from ai_manager.config.structured_models import FieldIssue, Mutation, StructuredDoc, StructuredKind
+from ai_manager.config.structured_models import (
+    DependentMatch, FieldIssue, Mutation, SaveResult, StructuredDoc, StructuredKind,
+)
 from ai_manager.config.structured_schema import PROVIDER_OPTIONS, SECRET_OPTION_KEYS
 from ai_manager.config.yaml_manager import _get_yaml_engine
 
@@ -247,3 +251,122 @@ def render(kind: StructuredKind, doc: StructuredDoc) -> bytes:
         return stream.getvalue().encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ConfigValidationError((FieldIssue((), "Configuration contains values that cannot be serialized."),)) from exc
+
+
+def _save_boundary(action):
+    """Translate unowned local I/O/parse failures into a save ConfigError.
+
+    Existing ``ConfigError`` subclasses pass through untouched so callers keep
+    the specific stale/validation/transaction error. Nothing is retried and no
+    supplied expected hash is ever replaced.
+    """
+    try:
+        return action()
+    except ConfigError:
+        raise
+    except (OSError, UnicodeError, YAMLError, ValueError, TypeError) as exc:
+        raise ConfigError(f"Configuration save failed: {exc}") from exc
+
+
+def commit(
+    kind: StructuredKind,
+    path: Path,
+    doc: StructuredDoc,
+    expected_sha256: bytes | None,
+    *,
+    dependents: tuple[DependentMatch, ...] = (),
+) -> SaveResult:
+    """Render, validate and atomically replace the primary and selected dependents.
+
+    Rendering happens entirely in memory, every validation stage runs against
+    the sealed candidate bytes, and the transaction stages exactly those bytes.
+    """
+    from ai_manager.config.structured_schema import (
+        validate_in_process,
+        validate_written_scalars,
+    )
+    from ai_manager.config.transaction import Transaction
+    from ai_manager.config.yaml_manager import (
+        _config_from_document,
+        _get_yaml_engine,
+        render_app_config,
+    )
+    from ai_manager.services.service_validation import validate_candidate
+
+    _check_kind(kind)
+    requested = Path(os.path.abspath(path))
+    canonical = requested.parent.resolve() / requested.name
+    if (
+        kind != doc.kind
+        or requested != doc.path
+        or canonical != doc.resolved_path
+        or expected_sha256 != doc.raw_sha256
+    ):
+        raise ConfigValidationError(
+            (
+                FieldIssue(
+                    (),
+                    "Save must use the loaded document's kind, path, and digest.",
+                ),
+            )
+        )
+
+    primary = _save_boundary(lambda: render(kind, doc))
+    sealed = {canonical: primary}
+    expected = {canonical: expected_sha256}
+    dependent_baselines = {}
+    scalar_mutations = list(effective_mutations(doc))
+    for match in dependents:
+        require_llm(match.meta)
+        target = match.path.parent.resolve() / match.path.name
+        if target in sealed or match.raw_sha256 != hashlib.sha256(match.raw_bytes).digest():
+            raise ConfigValidationError(
+                (
+                    FieldIssue(
+                        (),
+                        "Dependent snapshots must be unique and retain their captured digest.",
+                    ),
+                )
+            )
+
+        def update(tree, value=match.new_api_base):
+            tree["ai"]["api_base"] = value
+
+        raw = _save_boundary(lambda: render_app_config(match.meta, match.doc, update))
+        parsed = _save_boundary(lambda: _get_yaml_engine().load(raw.decode("utf-8")))
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("ai"), dict):
+            raise ConfigValidationError(
+                (FieldIssue(("ai",), "Dependent AI configuration must be a mapping."),)
+            )
+        sealed[target] = raw
+        expected[target] = match.raw_sha256
+        scalar_mutations.append(Mutation(("ai", "api_base"), "set", match.new_api_base))
+        dependent_baselines[match.meta.id] = _config_from_document(parsed)
+
+    # Stages 1-2 always run; stage 3 then re-reads only these sealed bytes.
+    validate_written_scalars(tuple(scalar_mutations))
+    parsed_primary, _parse_reasons = _save_boundary(
+        lambda: _parse_bytes(kind, canonical, primary)
+    )
+    validate_in_process(
+        kind, parsed_primary, config_path=canonical, app_dir=canonical.parent
+    )
+    validation = validate_candidate(kind, canonical, canonical.parent, primary)
+
+    with Transaction() as tx:
+        tx.prepare(list(sealed), expected)
+        tx.backups()
+        tx.stage(sealed)
+        report = tx.replace_all()
+
+    baseline = StructuredDoc(
+        kind=kind,
+        path=requested,
+        resolved_path=canonical,
+        doc=parsed_primary,
+        raw_bytes=primary,
+        raw_sha256=hashlib.sha256(primary).digest(),
+        existed=True,
+        mode=doc.mode if doc.existed else 0o600,
+    )
+    return SaveResult(baseline, report, validation, dependent_baselines)

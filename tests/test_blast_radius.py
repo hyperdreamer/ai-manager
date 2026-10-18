@@ -192,3 +192,78 @@ def test_non_regular_dependent_is_refused_without_read_or_mutation(five_app_work
     assert stat.S_ISFIFO(current.st_mode)
     assert (current.st_ino, current.st_mtime_ns, current.st_size) == (fifo.st_ino, fifo.st_mtime_ns, fifo.st_size)
     assert sorted(item.name for item in path.parent.iterdir()) == ["config.example.yaml", "config.yaml"]
+
+
+# --- Task 9: selected dependents commit through one transaction -----------
+
+
+@pytest.mark.parametrize("selected", [(), ("textkit",), ("ai-grammar", "textkit", "yt2txt")])
+def test_commit_selected_members_only(five_app_workspace, monkeypatch, selected):
+    from ai_manager.config import structured_config as sc
+    from ai_manager.config.structured_models import ValidationResult
+    import ai_manager.services.service_validation as service
+    monkeypatch.setattr(service, "validate_candidate", lambda *a: ValidationResult("service", "fixture valid"))
+    apps, before, after = drafts(five_app_workspace)
+    matches = find_affected_dependents(apps, before, after)
+    originals = {m.meta.id: m.raw_bytes for m in matches}
+    result = sc.commit("chat2api", before.path, after, before.raw_sha256, dependents=tuple(m for m in matches if m.meta.id in selected))
+    assert len(result.transaction.files) == 1 + len(selected)
+    assert set(result.saved_dependents) == set(selected)
+    for match in matches:
+        actual = match.path.read_bytes()
+        expected = originals[match.meta.id].replace(b":8000", b":8123") if match.meta.id in selected else originals[match.meta.id]
+        assert actual == expected
+    assert result.document.doc["server"]["port"] == 8123
+
+
+def test_dialog_snapshot_stale_refuses_every_member(five_app_workspace, monkeypatch):
+    from ai_manager.config import structured_config as sc
+    from ai_manager.config.config_errors import StaleDocumentError
+    from ai_manager.config.structured_models import ValidationResult
+    import ai_manager.services.service_validation as service
+    monkeypatch.setattr(service, "validate_candidate", lambda *a: ValidationResult("service", "fixture valid"))
+    apps, before, after = drafts(five_app_workspace)
+    matches = find_affected_dependents(apps, before, after)
+    matches[1].path.write_bytes(matches[1].raw_bytes + b"# later hand edit\n")
+    snapshots = {m.path: m.path.read_bytes() for m in matches}
+    with pytest.raises(StaleDocumentError):
+        sc.commit("chat2api", before.path, after, before.raw_sha256, dependents=matches)
+    assert before.path.read_bytes() == before.raw_bytes
+    assert all(path.read_bytes() == raw for path, raw in snapshots.items())
+
+
+def test_dependent_bytes_are_sealed_before_stage_three(five_app_workspace, monkeypatch):
+    from ai_manager.config import structured_config as sc
+    from ai_manager.config.structured_models import ValidationResult
+    from ai_manager.config.transaction import Transaction
+    import ai_manager.services.service_validation as service
+
+    path = five_app_workspace / "chat2api/config.json"
+    before = sc.load("chat2api", path)
+    after = replace(before, mutations=(Mutation(("server", "port"), "set", 8123),))
+    apps = get_managed_apps(five_app_workspace)
+    matches = find_affected_dependents(apps, before, after)
+    expected = {
+        match.path: render_app_config(match.meta, match.doc, lambda tree, m=match: tree["ai"].__setitem__("api_base", m.new_api_base))
+        for match in matches
+    }
+    staged: list[dict[Path, bytes]] = []
+
+    def validator(kind, target, app_dir, raw):
+        # A later mutable source change after sealing must not reach the target.
+        for match in matches:
+            match.doc["ai"]["api_base"] = "http://127.0.0.1:9999"
+        return ValidationResult("service", "fixture valid")
+
+    monkeypatch.setattr(service, "validate_candidate", validator)
+    original = Transaction.stage
+    def stage(self, rendered):
+        staged.append({p: b for p, b in rendered.items() if p != path.resolve()})
+        return original(self, rendered)
+    monkeypatch.setattr(Transaction, "stage", stage)
+    result = sc.commit("chat2api", path, after, before.raw_sha256, dependents=matches)
+    assert staged == [expected]
+    for match in matches:
+        assert match.path.read_bytes() == match.raw_bytes.replace(b":8000", b":8123")
+        assert b"9999" not in match.path.read_bytes()
+    assert set(result.saved_dependents) == {"ai-grammar", "textkit", "yt2txt"}

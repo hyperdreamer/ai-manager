@@ -309,3 +309,86 @@ def test_unhashable_unknown_kind_raises_unknown_config_kind_error(tmp_path, kind
         sv.validate_candidate(kind, app / "config.json", app, b"{}\n")
     with pytest.raises(UnknownConfigKindError):
         ai.verify_app_interpreter(kind, app, app / "venv/bin/python")
+
+
+# --- Task 9: save worker ownership ----------------------------------------
+
+
+def test_save_worker_owns_snapshot_and_emits_exactly_once(five_app_workspace, monkeypatch, qtbot):
+    from ai_manager.config import structured_config as sc
+    from ai_manager.config.app_registry import get_managed_apps
+    from ai_manager.config.config_errors import ConfigError
+    from ai_manager.services.config_jobs import StructuredSaveJob
+
+    meta = get_managed_apps(five_app_workspace)["chat2api"]
+    draft = sc.load("chat2api", meta.relative_path / "config.json")
+    job = StructuredSaveJob(meta, draft)
+    draft.doc["later-widget-edit"] = True
+    results, failures = [], []
+    job.signals.save_finished.connect(lambda app_id, result: results.append((app_id, result)))
+    job.signals.save_failed.connect(lambda app_id, error: failures.append((app_id, error)))
+    def fail(kind, path, owned, expected, **kwargs):
+        assert "later-widget-edit" not in owned.doc
+        raise ValueError("fixture invariant failure")
+    monkeypatch.setattr(sc, "commit", fail)
+    job.run()
+    assert results == [] and len(failures) == 1 and failures[0][0] == "chat2api"
+    assert isinstance(failures[0][1], ConfigError) and str(failures[0][1]) == "Configuration save failed: fixture invariant failure"
+
+
+def test_save_worker_passes_owned_kind_digest_and_dependents(five_app_workspace, monkeypatch):
+    from dataclasses import replace
+
+    from ai_manager.config import structured_config as sc
+    from ai_manager.config.app_registry import get_managed_apps
+    from ai_manager.config.blast_radius import find_affected_dependents
+    from ai_manager.config.structured_config import effective_mutations
+    from ai_manager.config.structured_models import Mutation, ValidationResult
+    import ai_manager.services.service_validation as service
+    from ai_manager.services.config_jobs import StructuredSaveJob
+
+    monkeypatch.setattr(service, "validate_candidate", lambda *a: ValidationResult("service", "fixture valid"))
+    apps = get_managed_apps(five_app_workspace)
+    meta = apps["chat2api"]
+    before = sc.load("chat2api", meta.relative_path / "config.json")
+    after = replace(before, mutations=(Mutation(("server", "port"), "set", 8123),))
+    matches = find_affected_dependents(apps, before, after)
+    selected = matches[:1]
+    job = StructuredSaveJob(meta, after, selected)
+    calls = []
+    def record(kind, path, owned, expected, **kwargs):
+        calls.append((kind, path, owned, expected, kwargs))
+        return _real(kind, path, owned, expected, **kwargs)
+    _real = sc.commit
+    monkeypatch.setattr(sc, "commit", record)
+    results, failures = [], []
+    job.signals.save_finished.connect(lambda app_id, result: results.append((app_id, result)))
+    job.signals.save_failed.connect(lambda app_id, error: failures.append((app_id, error)))
+    job.run()
+    assert failures == [] and len(results) == 1 and results[0][0] == "chat2api"
+    (kind, path, owned, expected, kwargs), = calls
+    assert kind == "chat2api" and path == after.path and owned is job.draft and expected == after.raw_sha256
+    assert kwargs == {"dependents": job.dependents} and job.dependents is not selected
+    assert effective_mutations(owned) == (Mutation(("server", "port"), "set", 8123),)
+    result = results[0][1]
+    assert result.transaction.committed and set(result.saved_dependents) == {"ai-grammar"}
+    # The captured dependent snapshot is unchanged even though the commit applied it.
+    assert selected[0].path.read_bytes() != selected[0].raw_bytes
+
+
+def test_save_worker_converts_config_errors_without_a_second_signal(five_app_workspace, monkeypatch):
+    from ai_manager.config import structured_config as sc
+    from ai_manager.config.app_registry import get_managed_apps
+    from ai_manager.config.config_errors import StaleDocumentError
+    from ai_manager.services.config_jobs import StructuredSaveJob
+
+    meta = get_managed_apps(five_app_workspace)["chat2api"]
+    draft = sc.load("chat2api", meta.relative_path / "config.json")
+    job = StructuredSaveJob(meta, draft)
+    error = StaleDocumentError(draft.path, draft.raw_sha256, b"y" * 32)
+    monkeypatch.setattr(sc, "commit", lambda *a, **k: (_ for _ in ()).throw(error))
+    emitted = []
+    job.signals.save_finished.connect(lambda app_id, result: emitted.append(("finished", result)))
+    job.signals.save_failed.connect(lambda app_id, err: emitted.append(("failed", err)))
+    job.run()
+    assert emitted == [("failed", error)]
