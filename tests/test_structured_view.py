@@ -7,6 +7,7 @@ read-only, start with nothing selected, and never touch the filesystem.
 from dataclasses import replace
 from pathlib import Path
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QCheckBox, QDialog, QLabel, QPlainTextEdit, QPushButton
 
 from ai_manager.config.app_registry import get_managed_apps
@@ -22,6 +23,7 @@ from ai_manager.ui.config_dialogs import (
     ReviewChangesDialog,
     StaleDocumentDialog,
     TransactionReportDialog,
+    _label,
 )
 
 BEFORE = b'{\n  "port": 8000\n}\n'
@@ -106,14 +108,20 @@ def test_blast_radius_save_alone_returns_no_ids_even_when_checked(qtbot, five_ap
 def test_blast_radius_cancel_rejects_and_selected_accepts(qtbot, five_app_workspace):
     cancel = BlastRadiusDialog(blast_matches(five_app_workspace))
     qtbot.addWidget(cancel)
-    buttons(cancel)["Cancel"].click()
+    cancel.show()
+    with qtbot.waitSignal(cancel.rejected, timeout=5000):
+        buttons(cancel)["Cancel"].click()
     assert cancel.result() == QDialog.DialogCode.Rejected
+    assert not cancel.isVisible()
     assert cancel.selected_app_ids() == ()
 
     accepted = BlastRadiusDialog(blast_matches(five_app_workspace))
     qtbot.addWidget(accepted)
-    buttons(accepted)["Save with Selected Updates"].click()
+    accepted.show()
+    with qtbot.waitSignal(accepted.accepted, timeout=5000):
+        buttons(accepted)["Save with Selected Updates"].click()
     assert accepted.result() == QDialog.DialogCode.Accepted
+    assert not accepted.isVisible()
     assert accepted.selected_app_ids() == ()
 
 
@@ -129,6 +137,35 @@ def test_blast_radius_escapes_checkbox_mnemonics_and_keeps_labels_plain(qtbot, f
     check = dialog.findChild(QCheckBox)
     assert check.text().startswith("Text && Kit: ")
     assert "uses $TOKEN & friends" in label_texts(dialog)
+
+
+def test_plain_labels_render_user_markup_literally(qtbot, five_app_workspace, tmp_path):
+    markup = "<b>A & B</b>"
+
+    helper = _label(markup, None)
+    qtbot.addWidget(helper)
+    assert helper.textFormat() == Qt.TextFormat.PlainText
+    assert helper.text() == markup
+
+    path = tmp_path / markup / "config.json"
+    stale = StaleDocumentDialog(path)
+    qtbot.addWidget(stale)
+    stale_label = next(
+        label for label in stale.findChildren(QLabel) if label.text() == str(path)
+    )
+    assert stale_label.textFormat() == Qt.TextFormat.PlainText
+    assert stale_label.text() == str(path)
+    assert "<b>A & B</b>" in stale_label.text()
+
+    warning = "<b>A & B</b> & <i>C</i>"
+    match = replace(blast_matches(five_app_workspace)[1], auth_warning=warning)
+    dialog = BlastRadiusDialog((match,))
+    qtbot.addWidget(dialog)
+    warning_label = next(
+        label for label in dialog.findChildren(QLabel) if label.text() == warning
+    )
+    assert warning_label.textFormat() == Qt.TextFormat.PlainText
+    assert warning_label.text() == warning
 
 
 def test_stale_document_defaults_to_cancel_and_reports_each_choice(qtbot, tmp_path):
@@ -167,11 +204,13 @@ def test_transaction_report_phase_summaries(qtbot, tmp_path):
         in label_texts(backups)
     )
 
+    backup = tmp_path / "config.json.20261017T160734000000Z.4321-abcdef.bak"
+    assert backup != path
     stage = TransactionReportDialog(
         TransactionReport(
             phase="stage",
             files={path: "unknown", other: "unknown"},
-            backups={path: tmp_path / "config.json.1-abcdef.bak"},
+            backups={path: backup},
             error="stage failed: synthetic",
         )
     )
@@ -185,7 +224,7 @@ def test_transaction_report_phase_summaries(qtbot, tmp_path):
     text = details.toPlainText()
     assert f"{path}: unknown" in text
     assert f"{other}: unknown" in text
-    assert f"Backup {path}: " in text
+    assert f"Backup {path}: {backup}" in text.splitlines()
     assert "stage failed: synthetic" in text
 
     recovered = TransactionReportDialog(
@@ -217,6 +256,7 @@ def test_transaction_report_restore_failure_text_and_rows(qtbot, tmp_path):
     )
     text = dialog.findChild(QPlainTextEdit).toPlainText()
     assert f"{path}: permission denied" in text
+    assert f"Backup {path}: {report.backups[path]}" in text.splitlines()
     assert (
         "Reload affected files after resolving the reported recovery failures." in text
     )
