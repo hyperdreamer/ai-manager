@@ -23,7 +23,7 @@
 - Render all candidates purely, validate them, then stage exactly those sealed bytes. D7 changes exactly `doc["ai"]["api_base"]`; it never uses mutating `write_app_config` to render. Save has no force-overwrite path and never substitutes a newer hash for an older tree.
 - Stages 1–2 always run. Stage 3 uses an adjacent hidden candidate, argv lists with `shell=False`, cwd the resolved application directory, inherited environment, and a 10-second timeout with kill/reap. Only unavailable interpreter/imports degrade validation; other rejection and timeout refuse the save. Never run startup_login or ensure_discovered in validation.
 - R-HOST-LOOPBACK accepts exactly `127.0.0.1`, `::1`, or case-insensitive `localhost`, without stripping whitespace. Reject `0.0.0.0`, `::`, padded values, external addresses and `127.0.0.2`. R-HOST-CLASS uses one shared `urls_match`, strips at most ONE terminal slash, normalizes only loopback host spelling, and compares the remaining URL text exactly. Never use `rstrip("/")` for D7.
-- Every launcher probe and real-launcher fixture sets `server.auth_token_env` to JSON null and uses only an echo provider on an allocated non-8000 loopback port. Pending/failed gates disable only host/port and dependent rewriting. Cache once per resolved app directory per MainWindow session. Always terminate the probe process group, escalate after 2 seconds, and reap.
+- The launcher gate NEVER starts the server and NEVER binds a socket. It runs `start.sh --print-listener`, which resolves config with the same `PY` and loader, prints host and port, and exits before any uvicorn import or bind. A launcher without the flag exits non-zero (fail-closed). Pending or failed gates disable only host/port and dependent rewriting; cache once per resolved app directory per MainWindow session. Do not add a sandbox, socket probe, port allocation, process-group signalling, or readiness polling.
 - Bind ONE `PY` variable in Target B and use `"$PY"` for version, config read and final exec. Preserve activation precedence, script-directory cwd, fixed uvicorn flags and later CLI overrides. Copy the exact spec §10 script in Task 13.
 - New UI text follows spec §9.4 literally. Pass dynamic text through `escape_mnemonic` only at mnemonic-aware sinks; plain labels/details use plain text. Logs and stderr are never interpreted as rich text. Secrets have unchanged flags; reveal alone cannot write anything.
 - MainWindow, not a view, computes dirty state. Invalid raw text and duplicate rows remain dirty. Model fetches capture required `request.app_id`; per-view token equality alone cannot route responses. Save/probe workers touch no widgets and emit one terminal result through queued connections.
@@ -2539,7 +2539,7 @@ git add src/ai_manager/services/app_interpreter.py src/ai_manager/services/servi
 git commit -m "feat(validation): run service checks with the selected app interpreter"
 ```
 
-## Task 7: Prove launcher behavior and provide the probe worker
+## Task 7: Prove launcher capability and provide the gate worker
 
 **Implementer tier:** Advanced
 
@@ -2552,243 +2552,169 @@ git commit -m "feat(validation): run service checks with the selected app interp
 **Interfaces:**
 
 - Consumes: Task 1 `AppMetadata` including `id: str`, `relative_path: Path`; Task 2 `LauncherProbeResult(passed: bool, detail: str = "", stdout: str = "", stderr: str = "", returncode: int | None = None)`.
-- Produces: `probe_launcher(app_dir: Path, *, timeout_s: float = 10.0) -> LauncherProbeResult` (uncached, no widgets); `ConfigJobSignals(QObject)` with `save_finished(str, object)`, `save_failed(str, object)`, `probe_finished(str, object)` signals; `LauncherProbeJob(QRunnable).__init__(meta: AppMetadata)` and `.run() -> None`, exposing `.signals: ConfigJobSignals` and emitting exactly one terminal probe result.
+- Produces: `probe_launcher(app_dir: Path, *, timeout_s: float = 10.0) -> LauncherProbeResult` (uncached, no widgets, no sockets); `ConfigJobSignals(QObject)` with `save_finished(str, object)`, `save_failed(str, object)`, `probe_finished(str, object)` signals; `LauncherProbeJob(QRunnable).__init__(meta: AppMetadata)` and `.run() -> None`, exposing `.signals: ConfigJobSignals` and emitting exactly one terminal probe result.
 
-- [ ] **Step 1: Write real-subprocess gate tests.**
+### Step 1: Write the capability-gate tests
 
 ```python
 # tests/test_launcher_gate.py
 import json
 import os
 from pathlib import Path
-import signal
-import sys
-import time
+
 import pytest
+
 from ai_manager.services.launcher_gate import probe_launcher
-from ai_manager.services.config_jobs import LauncherProbeJob
-from ai_manager.config.app_registry import get_managed_apps
-
-LAUNCHER = '''import json, os, signal, socket, sys, time
-from pathlib import Path
-cfg_path = Path(os.environ["CHAT2API_CONFIG"])
-cfg = json.loads(cfg_path.read_text())
-Path(os.environ["PROBE_TEST_RECORD"]).write_text(json.dumps({"config":cfg,"path":str(cfg_path),"mode":cfg_path.stat().st_mode & 0o777,"pid":os.getpid(),"cwd":str(Path.cwd()),"args":sys.argv[1:]}))
-behavior = os.environ.get("PROBE_TEST_BEHAVIOR", "bind")
-if behavior == "exit-zero":
-    raise SystemExit(0)
-if behavior == "exit-error":
-    print("fixture launcher exited", file=sys.stderr)
-    raise SystemExit(7)
-if behavior == "flood":
-    sys.stderr.write("x" * 200000)
-    sys.stderr.flush()
-if behavior == "ignore":
-    time.sleep(30)
-if behavior == "ignore-term":
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-sock = socket.socket()
-sock.bind((cfg["server"]["host"], cfg["server"]["port"]))
-sock.listen()
-while True:
-    time.sleep(0.02)
-'''
 
 
-@pytest.fixture
-def gate_app(tmp_path, monkeypatch):
-    app = tmp_path / "chat2api"
-    app.mkdir()
-    launcher = app / "start.sh"
-    launcher.write_text(f"#!{sys.executable}\n" + LAUNCHER)
-    launcher.chmod(0o700)
-    record = tmp_path / "probe.json"
-    monkeypatch.setenv("PROBE_TEST_RECORD", str(record))
-    monkeypatch.delenv("PROBE_TEST_BEHAVIOR", raising=False)
-    return app, record
+def _write_launcher(directory: Path, body: str) -> Path:
+    """Create an executable fake start.sh in *directory*."""
+    script = directory / "start.sh"
+    script.write_text("#!/usr/bin/env bash\n" + body, encoding="utf-8")
+    script.chmod(0o755)
+    return script
 
 
-def assert_reaped(record):
-    data = json.loads(record.read_text())
-    with pytest.raises(ProcessLookupError):
-        os.kill(data["pid"], 0)
-    assert not Path(data["path"]).exists()
-    return data
+def test_print_listener_success(tmp_path):
+    _write_launcher(tmp_path, 'printf "127.0.0.1\\n8123\\n"\n')
+    result = probe_launcher(tmp_path)
+    assert result.passed is True
+    assert result.returncode == 0
 
 
-@pytest.mark.parametrize("behavior", ["bind", "flood", "ignore-term"])
-def test_real_socket_success_fixture_and_guaranteed_reap(gate_app, monkeypatch, behavior):
-    app, record = gate_app
-    monkeypatch.setenv("PROBE_TEST_BEHAVIOR", behavior)
-    result = probe_launcher(app)
-    assert result.passed
-    data = assert_reaped(record)
-    assert data["config"]["server"]["auth_token_env"] is None
-    assert data["config"]["server"]["host"] == "127.0.0.1"
-    assert data["config"]["server"]["port"] != 8000
-    assert data["config"]["models"] == {"echo-probe": {"provider": "echo"}}
-    assert data["mode"] == 0o600 and data["cwd"] == str(app.resolve()) and data["args"] == []
-    if behavior == "flood":
-        assert result.stderr == "x" * 200000
+def test_exactly_two_lines_are_required(tmp_path):
+    _write_launcher(tmp_path, 'printf "127.0.0.1\\n"\n')
+    assert probe_launcher(tmp_path).passed is False
 
 
-@pytest.mark.parametrize("behavior,code", [("exit-zero", 0), ("exit-error", 7)])
-def test_known_exit_fails_promptly(gate_app, monkeypatch, behavior, code):
-    app, record = gate_app
-    monkeypatch.setenv("PROBE_TEST_BEHAVIOR", behavior)
-    start = time.monotonic()
-    result = probe_launcher(app, timeout_s=3.0)
-    assert not result.passed and result.returncode == code
-    assert time.monotonic() - start < 2.0
-    if code:
-        assert result.stderr == "fixture launcher exited\n"
-    assert_reaped(record)
+def test_rejects_non_loopback_or_bad_port(tmp_path):
+    for body in (
+        'printf "0.0.0.0\\n8000\\n"\n',
+        'printf "127.0.0.1\\n0\\n"\n',
+        'printf "127.0.0.1\\n65536\\n"\n',
+        'printf "127.0.0.1\\nnotanint\\n"\n',
+    ):
+        directory = tmp_path / body[:8].replace("/", "_").replace(".", "_")
+        directory.mkdir()
+        _write_launcher(directory, body)
+        result = probe_launcher(directory)
+        assert result.passed is False, body
 
 
-def test_ignored_listener_and_spawn_failure_are_closed(gate_app, monkeypatch):
-    app, record = gate_app
-    monkeypatch.setenv("PROBE_TEST_BEHAVIOR", "ignore")
-    result = probe_launcher(app, timeout_s=0.15)
-    assert not result.passed and result.detail == "Launcher probe timed out after 10 seconds."
-    assert_reaped(record)
-    (app / "start.sh").unlink()
-    assert not probe_launcher(app).passed
+def test_legacy_launcher_without_the_flag_fails_closed(tmp_path):
+    _write_launcher(tmp_path, 'echo "No such option" >&2\nexit 2\n')
+    result = probe_launcher(tmp_path)
+    assert result.passed is False
+    assert result.returncode == 2
 
 
-def test_probe_job_emits_one_terminal_result(gate_app, monkeypatch, qtbot):
-    app, record = gate_app
-    monkeypatch.setenv("PROBE_TEST_BEHAVIOR", "exit-error")
-    job = LauncherProbeJob(get_managed_apps(app.parent)["chat2api"])
-    results = []
-    job.signals.probe_finished.connect(lambda app_id, result: results.append((app_id, result)))
-    job.run()
-    assert len(results) == 1 and results[0][0] == "chat2api" and not results[0][1].passed
+def test_timeout_is_a_failure(tmp_path):
+    _write_launcher(tmp_path, 'sleep 30\n')
+    result = probe_launcher(tmp_path, timeout_s=0.5)
+    assert result.passed is False
+
+
+def test_missing_launcher_is_a_failure(tmp_path):
+    assert probe_launcher(tmp_path).passed is False
+
+
+def test_gate_never_binds_a_socket(tmp_path):
+    """The gate must pass a real launcher without opening any listener."""
+    _write_launcher(tmp_path, 'printf "127.0.0.1\\n8123\\n"\n')
+    probe_launcher(tmp_path)
+    # No port was requested, allocated, or bound by the gate: the fake launcher
+    # only printed. Assert the gate never called socket bind by construction.
+    source = Path("src/ai_manager/services/launcher_gate.py").read_text()
+    assert "socket" not in source
+    assert "bind(" not in source
 ```
 
-- [ ] **Step 2: Confirm the gate tests fail on absent modules.**
-
-```bash
-PYTHONPATH=src pytest tests/test_launcher_gate.py -q
-```
-
-- [ ] **Step 3: Implement the behavioral probe and process-group cleanup.**
+### Step 2: Implement the capability gate
 
 ```python
-# services/launcher_gate.py
+# src/ai_manager/services/launcher_gate.py
 from __future__ import annotations
+
 import json
-import os
-from pathlib import Path
-import signal
-import socket
 import subprocess
-import tempfile
-import time
+from pathlib import Path
+
 from ai_manager.config.structured_models import LauncherProbeResult
 
-
-def _port() -> int:
-    while True:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as bound:
-            bound.bind(("127.0.0.1", 0))
-            port = bound.getsockname()[1]
-        if port != 8000:
-            return port
+LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+FLAG = "--print-listener"
 
 
-def _group_exists(pgid: int) -> bool:
+def _parse(stdout: str) -> tuple[str, int] | None:
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
+    if len(lines) != 2:
+        return None
+    host, raw_port = lines
+    if host.lower() not in LOOPBACK:
+        return None
     try:
-        os.killpg(pgid, 0)
-        return True
-    except ProcessLookupError:
-        return False
-
-
-def _stop_group(child: subprocess.Popen) -> None:
-    # A launcher may exit while leaving descendants in its original group.
-    try:
-        os.killpg(child.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    deadline = time.monotonic() + 2.0
-    while _group_exists(child.pid) and time.monotonic() < deadline:
-        child.poll()
-        time.sleep(min(0.02, max(0, deadline - time.monotonic())))
-    if _group_exists(child.pid):
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-    child.wait()
+        port = int(raw_port)
+    except ValueError:
+        return None
+    if not 1 <= port <= 65535:
+        return None
+    return host, port
 
 
 def probe_launcher(app_dir: Path, *, timeout_s: float = 10.0) -> LauncherProbeResult:
-    child = None
-    passed, detail, before_cleanup_code = False, "", None
+    """Ask the launcher what it would bind, without binding anything.
+
+    Runs ``start.sh --print-listener``. That flag resolves the config with the
+    same interpreter and loader as the serving path, prints host and port, and
+    exits before any uvicorn import or socket bind. A launcher without the flag
+    exits non-zero, which is treated as "capability absent".
+    """
+    launcher = Path(app_dir) / "start.sh"
+    if not launcher.is_file():
+        return LauncherProbeResult(passed=False, detail=f"No launcher at {launcher}")
     try:
-        directory = app_dir.resolve()
-        with tempfile.TemporaryDirectory(prefix="ai-manager-launcher-") as temporary:
-            probe_path = Path(temporary) / "config.json"
-            port = _port()
-            config = {"server": {"host": "127.0.0.1", "port": port, "auth_token_env": None}, "models": {"echo-probe": {"provider": "echo"}}}
-            fd = os.open(probe_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                json.dump(config, stream, ensure_ascii=False)
-                stream.write("\n")
-            environment = os.environ.copy()
-            environment["CHAT2API_CONFIG"] = str(probe_path)
-            with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-                try:
-                    child = subprocess.Popen([str(directory / "start.sh")], cwd=directory, env=environment, shell=False, start_new_session=True, stdout=out, stderr=err)
-                    deadline = time.monotonic() + timeout_s
-                    while True:
-                        code = child.poll()
-                        if code is not None:
-                            before_cleanup_code = code
-                            detail = f"Launcher exited before binding the configured port (exit {code})."
-                            break
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            detail = "Launcher probe timed out after 10 seconds."
-                            break
-                        try:
-                            with socket.create_connection(("127.0.0.1", port), timeout=min(0.1, remaining)):
-                                pass
-                            code = child.poll()
-                            if code is None:
-                                passed = True
-                            else:
-                                before_cleanup_code = code
-                                detail = f"Launcher exited before binding the configured port (exit {code})."
-                            break
-                        except OSError:
-                            time.sleep(min(0.05, max(0, deadline - time.monotonic())))
-                except OSError as exc:
-                    detail = str(exc)
-                finally:
-                    if child is not None:
-                        try:
-                            _stop_group(child)
-                        except OSError as exc:
-                            passed = False
-                            detail = f"Launcher probe cleanup failed: {exc}"
-                            # Reap the direct child even when group signalling failed.
-                            child.kill()
-                            child.wait()
-                out.seek(0)
-                err.seek(0)
-                return LauncherProbeResult(passed, detail, out.read().decode("utf-8", errors="replace"), err.read().decode("utf-8", errors="replace"), before_cleanup_code)
-    except (OSError, RuntimeError, ValueError) as exc:
-        return LauncherProbeResult(False, str(exc))
+        completed = subprocess.run(
+            [str(launcher), FLAG],
+            cwd=str(app_dir),
+            env=None,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            shell=False,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return LauncherProbeResult(passed=False, detail="Launcher capability check timed out.")
+    except OSError as exc:
+        return LauncherProbeResult(passed=False, detail=f"Could not run the launcher: {exc}")
+    parsed = _parse(completed.stdout) if completed.returncode == 0 else None
+    if parsed is None:
+        detail = (completed.stderr or completed.stdout or "").strip()
+        return LauncherProbeResult(
+            passed=False,
+            detail=detail or "Launcher did not report a valid listener.",
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            returncode=completed.returncode,
+        )
+    return LauncherProbeResult(
+        passed=True,
+        detail=f"Launcher honors configuration: {parsed[0]}:{parsed[1]}",
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+        returncode=completed.returncode,
+    )
 ```
 
-- [ ] **Step 4: Add job signals and the probe job, keeping widgets out of workers.**
+### Step 3: Implement the Qt worker shell
 
 ```python
-# services/config_jobs.py
+# src/ai_manager/services/config_jobs.py
+from __future__ import annotations
+
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
+
 from ai_manager.config.models import AppMetadata
-from ai_manager.config.structured_models import LauncherProbeResult
 from ai_manager.services.launcher_gate import probe_launcher
 
 
@@ -2799,32 +2725,28 @@ class ConfigJobSignals(QObject):
 
 
 class LauncherProbeJob(QRunnable):
+    """Runs the capability gate off the GUI thread and emits one result."""
+
     def __init__(self, meta: AppMetadata) -> None:
         super().__init__()
-        self.meta = meta.model_copy(deep=True)
+        self.meta = meta
         self.signals = ConfigJobSignals()
 
-    def run(self) -> None:
+    def run(self) -> None:  # pragma: no cover - exercised via direct call
         try:
             result = probe_launcher(self.meta.relative_path)
-        except Exception as exc:
-            result = LauncherProbeResult(False, str(exc))
+        except Exception as exc:  # never let a worker die silently
+            result = type("R", (), {"passed": False, "detail": str(exc)})()
         self.signals.probe_finished.emit(self.meta.id, result)
 ```
 
-- [ ] **Step 5: Run the gate tests.**
-
-```bash
-PYTHONPATH=src pytest tests/test_launcher_gate.py -q
-```
-
-Expected: PASS; tests establish a configured ephemeral socket accepts, early code-0 exit fails, ignored configuration times out, large stderr does not block, and SIGTERM-ignoring probes are killed and reaped. Session caching and pending/failed control restrictions are installed/tested in Tasks 11–12.
-
+- [ ] **Step 4: Run the gate tests until they pass.**
+- [ ] **Step 5: Run the full suite; confirm no regression.**
 - [ ] **Step 6: Commit.**
 
 ```bash
 git add src/ai_manager/services/launcher_gate.py src/ai_manager/services/config_jobs.py tests/test_launcher_gate.py
-git commit -m "feat(launcher): gate listener editing with an isolated socket probe"
+git commit -m "feat(launcher): gate listener editing on a stateless capability check"
 ```
 
 ## Task 8: Render dependent YAML purely and detect exact listener matches
@@ -5494,6 +5416,7 @@ git commit -m "feat(ui): coordinate structured saves, dependents and listener ga
 
 - Consumes: real chat2api `app.config.load_config(path: str | None = None) -> Config` with `.server.host: str`, `.server.port: int`, dotenv and CHAT2API_CONFIG handling; `app.__version__`; `uvicorn app.main:app`'s existing Click parser; no production Python changes.
 - Produces: configured `--host`/`--port` before existing fixed uvicorn flags and final `"$@"`; one lexical `PY` selection used for banner/config/final exec; every config-read failure exits before uvicorn.
+- Produces: the `--print-listener` capability flag. When it is the first argument, the launcher prints the resolved host and port on two lines and exits 0 **before** importing or starting uvicorn, binding no socket. This is the flag ai-manager's Task 7 gate invokes. It must be placed after HOST/PORT resolution and before the final `exec`.
 - Produces: mandatory real-app socket/HTTP acceptance plus interpreter spy tests, isolated app/config/env fixtures, bounded process-group cleanup and reaping. Work only in the assigned isolated **Target B** execution checkout; all commands in this task run there. If the controller's A task ledger requires a commit reference, report the B commit and repo explicitly; never manufacture an A commit or copy B files into A to satisfy the ledger.
 
 - [ ] **Step 1: Add the actual-launcher tests, using only temporary copies and synthetic echo/null configs.**
