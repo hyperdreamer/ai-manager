@@ -2,8 +2,8 @@
 # Derived by the PM from the validated source plan; never hand-edited.
 source_plan:
   path: docs/superpowers/plans/2026-10-17-chat2api-file-bridge.md
-  sha256: dd6ec1010a7c47c52ec29c38df975cfd6a33e6c3a6b63624357a70744c81f9f4
-  commit_oid: 13778caa62b96b5fe8a793824a80eaa2ed00b139
+  sha256: 4dfe9ef587128adaeaefad255abad56f9344f1210f6730cc61cdef9bc5f027f5
+  commit_oid: c29c4e1455ed78bfb0896380dd1eb3e38505b14d
 topic_slug: chat2api-file-bridge
 epoch: 1
 repositories:
