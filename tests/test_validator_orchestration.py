@@ -297,3 +297,15 @@ def test_unknown_kind_raises_unknown_config_kind_error(tmp_path, kind):
         sv.validate_candidate(kind, app / "config.json", app, b"{}\n")
     with pytest.raises(UnknownConfigKindError):
         ai.verify_app_interpreter(kind, app, app / "venv/bin/python")
+
+
+@pytest.mark.parametrize("kind", [[], {}, set()])
+def test_unhashable_unknown_kind_raises_unknown_config_kind_error(tmp_path, kind):
+    from ai_manager.config.config_errors import UnknownConfigKindError
+
+    app = tmp_path / "app"
+    app.mkdir()
+    with pytest.raises(UnknownConfigKindError):
+        sv.validate_candidate(kind, app / "config.json", app, b"{}\n")
+    with pytest.raises(UnknownConfigKindError):
+        ai.verify_app_interpreter(kind, app, app / "venv/bin/python")

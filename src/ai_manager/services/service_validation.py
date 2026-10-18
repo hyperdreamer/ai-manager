@@ -70,6 +70,8 @@ def validate_candidate(
     timeout and local I/O failures raise; none of them may be mistaken for a
     successful or degraded validation.
     """
+    if not isinstance(kind, str):
+        raise UnknownConfigKindError(kind)
     try:
         program = VALIDATE_PROGRAMS[kind]
     except KeyError:

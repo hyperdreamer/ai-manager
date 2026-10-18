@@ -59,6 +59,8 @@ def verify_app_interpreter(
     A spawn error, nonzero exit or timeout raises ``InterpreterUnavailableError``.
     The probe process is always reaped.
     """
+    if not isinstance(kind, str):
+        raise UnknownConfigKindError(kind)
     try:
         program = IMPORT_PROGRAMS[kind]
     except KeyError:
