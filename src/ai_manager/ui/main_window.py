@@ -120,8 +120,12 @@ class MainWindow(QMainWindow):
         self._poll_timer.timeout.connect(self.supervisor_manager.refresh_status)
         self._poll_timer.start(self.settings.poll_interval_ms)
 
-        # Initial refresh
-        self.supervisor_manager.refresh_status()
+        # Initial probe: one automatic start attempt, only if the supervisor is
+        # reported stopped. Cancelled process-wide by any manual action or quit.
+        app = QApplication.instance()
+        if app is not None:
+            app.aboutToQuit.connect(self.supervisor_manager.cancel_pending_autostart)
+        self.supervisor_manager.start_if_not_running()
 
     def _init_ui(self) -> None:
         self.setWindowTitle("ai-manager — AI Provider Configuration & Service Controller")
@@ -285,10 +289,7 @@ class MainWindow(QMainWindow):
                 self.views[app_id].update_service_status(normalized_status)
 
     def _on_supervisor_btn_clicked(self) -> None:
-        if self._supervisor_action_btn.text() == "Start Supervisor":
-            self.supervisor_manager.start_supervisor()
-        else:
-            self.supervisor_manager.start_supervisor()
+        self.supervisor_manager.start_supervisor()
 
     def _on_supervisor_action(self, action: str, success: bool, msg: str) -> None:
         if not success:
@@ -364,6 +365,7 @@ class MainWindow(QMainWindow):
 
     def _exit_application(self) -> None:
         """Terminate the process even though quit-on-last-window is disabled."""
+        self.supervisor_manager.cancel_pending_autostart()
         self._force_quit = True
         app = QApplication.instance()
         if app is not None:
