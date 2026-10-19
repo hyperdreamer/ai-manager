@@ -108,4 +108,12 @@ def isolate_manager(monkeypatch):
             for app_id, meta in window.apps.items():
                 if meta.config_kind == "chat2api":
                     window._on_launcher_probe_finished(app_id, LauncherProbeResult(True))
+        # Keep the production starter reachable: tests that pin probe caching
+        # call it explicitly and must never reach a live process.
+        monkeypatch.setattr(
+            mw.MainWindow,
+            "_production_start_launcher_probes",
+            mw.MainWindow._start_launcher_probes,
+            raising=False,
+        )
         monkeypatch.setattr(mw.MainWindow, "_start_launcher_probes", passed)

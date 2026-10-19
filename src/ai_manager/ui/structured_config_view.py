@@ -351,6 +351,7 @@ class StructuredConfigView(QWidget):
         footer = QFrame(page)
         footer.setObjectName("footerActionBar")
         actions = QHBoxLayout(footer)
+        self._dirty_label = _label("", self)
         self._create_btn = QPushButton("Create from Example", self)
         self._create_btn.clicked.connect(self._create_from_example)
         self._review_btn = QPushButton("Review Changes", self)
@@ -360,6 +361,7 @@ class StructuredConfigView(QWidget):
         self._save_restart_btn = QPushButton("Save and Restart", self)
         self._save_restart_btn.clicked.connect(lambda: self._emit_save(True))
         for widget in (
+            self._dirty_label,
             self._create_btn,
             self._review_btn,
             self._save_only_btn,
@@ -850,9 +852,11 @@ class StructuredConfigView(QWidget):
         self._readonly_label.setText("\n".join(lines))
         self._controls()
 
-    def show_config_error(self, message, detail="") -> None:
+    def show_config_error(self, message, detail=None) -> None:
         self._notice_label.setText(message)
-        self._details.setPlainText(detail)
+        if detail is not None:
+            # Omitted detail preserves the validator output already displayed.
+            self._details.setPlainText(detail)
         if detail:
             self._details_toggle.setChecked(True)
 

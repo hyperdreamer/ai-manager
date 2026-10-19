@@ -140,3 +140,117 @@ def test_update_service_status_updates_log_state_and_header_without_config_signa
     assert detail.log_view._service_state_label.text() == "service restarting"
     assert "Restarting" in detail._status_badge._text_label.text()
     assert detail._known_log_path is None
+
+
+def test_llm_adapter_signals_payload_object_and_common_surface(qtbot):
+    """Task 11's deferred item: both views must be storable in one dict.
+
+    ``save_requested`` and ``config_changed`` carry ``object`` so a single Qt
+    connection signature serves the LLM and structured adapters alike.
+    """
+    from PyQt6.QtCore import QMetaMethod
+
+    detail = AppDetailView(get_managed_apps(Path("/tmp"))["ai-grammar"])
+    qtbot.addWidget(detail)
+    meta = detail.metaObject()
+    declared = {}
+    for index in range(meta.methodOffset(), meta.methodCount()):
+        method = meta.method(index)
+        if method.methodType() == QMetaMethod.MethodType.Signal:
+            declared[bytes(method.name()).decode()] = bytes(
+                method.methodSignature()
+            ).decode()
+    assert declared["save_requested"] == "save_requested(QString,PyQt_PyObject,bool)"
+    assert declared["config_changed"] == "config_changed(QString,PyQt_PyObject)"
+    for name in ("adopt_saved_baseline", "show_config_error", "set_save_in_progress"):
+        assert callable(getattr(detail, name))
+
+
+def test_llm_adopt_saved_baseline_rebases_with_and_without_draft(qtbot):
+    detail = AppDetailView(get_managed_apps(Path("/tmp"))["textkit"])
+    qtbot.addWidget(detail)
+    detail.load_config(AppAIConfig(api_base="http://127.0.0.1:8000", model="saved"))
+    detail._model_combo.setEditText("user-typed")
+    committed = AppAIConfig(api_base="http://127.0.0.1:8123", model="saved")
+
+    detail.adopt_saved_baseline(committed, preserve_draft=True)
+    # The baseline moves; the widget values and the draft do not.
+    assert detail._current_config == committed
+    assert detail.get_current_draft() == AppAIConfig(
+        api_base="http://127.0.0.1:8000", model="user-typed"
+    )
+
+    detail.adopt_saved_baseline(committed, preserve_draft=False)
+    assert detail._current_config == committed
+    assert detail.get_current_draft() == committed
+
+
+def test_llm_show_config_error_displays_plain_text_detail(qtbot):
+    from PyQt6.QtCore import Qt
+
+    detail = AppDetailView(get_managed_apps(Path("/tmp"))["ai-grammar"])
+    qtbot.addWidget(detail)
+    assert detail._config_error_details.isHidden()
+    detail.show_config_error("Rejected & <nothing> saved.", "<exact & stderr>\n")
+    assert detail._config_error_label.text() == "Rejected & <nothing> saved."
+    assert detail._config_error_label.textFormat() == Qt.TextFormat.PlainText
+    assert detail._config_error_details.toPlainText() == "<exact & stderr>\n"
+    assert not detail._config_error_details.isHidden()
+    detail.show_config_error("Configuration saved.")
+    assert detail._config_error_details.isHidden()
+
+
+def test_llm_set_save_in_progress_disables_only_configuration_controls(qtbot):
+    detail = AppDetailView(get_managed_apps(Path("/tmp"))["textkit"])
+    qtbot.addWidget(detail)
+    detail.set_save_in_progress(True)
+    assert not detail._provider_group.isEnabled()
+    assert not detail._model_group.isEnabled()
+    assert not detail._save_only_btn.isEnabled()
+    assert not detail._save_restart_btn.isEnabled()
+    # Logs and Restart Service Only stay usable while a save is in flight.
+    assert detail._tabs.isEnabled() and detail.log_view.isEnabled()
+    assert detail._restart_btn.isEnabled()
+    detail.set_save_in_progress(False)
+    assert detail._provider_group.isEnabled() and detail._model_group.isEnabled()
+    assert detail._save_only_btn.isEnabled() and detail._save_restart_btn.isEnabled()
+
+
+def test_sidebar_shows_the_saved_port_and_survives_dirty_repaint(qtbot):
+    apps = get_managed_apps(Path("/tmp"))
+    sidebar = AppSidebar(apps)
+    qtbot.addWidget(sidebar)
+
+    sidebar.select_app("file-bridge")
+    assert "Port 8964" in sidebar._list_widget.currentItem().text()
+
+    sidebar.update_configured_port("file-bridge", 9100)
+    assert "Port 9100" in sidebar._list_widget.currentItem().text()
+
+    # Dirty and status repaints must not lose the cached saved port.
+    sidebar.set_dirty("file-bridge", True)
+    assert "Port 9100" in sidebar._list_widget.currentItem().text()
+    sidebar.update_status(
+        "file-bridge", ServiceStatus(service_id="file-bridge", state=ServiceRunState.RUNNING)
+    )
+    assert "Port 9100" in sidebar._list_widget.currentItem().text()
+
+    # None forgets the cache and falls back to the metadata default.
+    sidebar.update_configured_port("file-bridge", None)
+    assert "Port 8964" in sidebar._list_widget.currentItem().text()
+
+
+def test_sidebar_update_configured_port_validates_id_and_range(qtbot):
+    import pytest
+
+    apps = get_managed_apps(Path("/tmp"))
+    sidebar = AppSidebar(apps)
+    qtbot.addWidget(sidebar)
+    with pytest.raises(KeyError):
+        sidebar.update_configured_port("unknown", 8000)
+    for bad in (True, False, 0, 65536, -1, 8000.0, "8000"):
+        with pytest.raises(ValueError):
+            sidebar.update_configured_port("chat2api", bad)
+    sidebar.update_configured_port("chat2api", 1)
+    sidebar.update_configured_port("chat2api", 65535)
+    assert sidebar._configured_ports["chat2api"] == 65535
