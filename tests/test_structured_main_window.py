@@ -5,6 +5,7 @@ deterministic GUI-thread state instead of racing a QThreadPool.
 """
 
 import copy
+import gc
 import hashlib
 import json
 from dataclasses import replace
@@ -117,6 +118,70 @@ def test_five_views_saved_ports_dirty_revert_and_kind_refusal(window):
         window.sidebar.update_configured_port("chat2api", 65536)
     with pytest.raises(KeyError):
         window.sidebar.update_configured_port("unknown", None)
+
+
+def test_unsupported_config_kind_refuses_dispatch_instead_of_silent_fallback(
+    qapp, five_app_workspace, monkeypatch
+):
+    """An unregistered ``config_kind`` must abort construction, never fall back.
+
+    The five registered ids are covered by the dispatch test above, but that test
+    cannot see a regression that replaces the unknown-kind ``raise`` with a
+    silent ``AppDetailView`` fallback. Inject a sixth app whose kind is not
+    registered and require ``MainWindow`` itself to refuse it.
+
+    ``AppMetadata.config_kind`` has a ``mode="before"`` field validator that
+    rejects any kind outside llm/chat2api/file-bridge, so pydantic would raise
+    before ``MainWindow`` ever saw the value. The metadata is therefore built
+    from a real record with a valid kind and the unsupported value is injected
+    with ``object.__setattr__``, which is exactly the "metadata validation was
+    bypassed" situation the guard must still cover.
+    """
+    registered = mw.get_managed_apps(five_app_workspace)
+    unsupported = registered["chat2api"].model_copy()
+    object.__setattr__(unsupported, "id", "quantum-app")
+    object.__setattr__(unsupported, "config_kind", "quantum")
+    assert unsupported.config_kind == "quantum"  # validator really was bypassed
+    apps = dict(registered)
+    apps["quantum-app"] = unsupported
+    monkeypatch.setattr(mw, "get_managed_apps", lambda root: apps)
+
+    created: list[tuple[str, str]] = []
+
+    def recording(factory, label):
+        class Recorder(factory):
+            def __init__(self, app_meta, parent=None):
+                created.append((app_meta.id, label))
+                super().__init__(app_meta, parent)
+
+        return Recorder
+
+    monkeypatch.setattr(mw, "AppDetailView", recording(mw.AppDetailView, "AppDetailView"))
+    monkeypatch.setattr(
+        mw, "StructuredConfigView", recording(mw.StructuredConfigView, "StructuredConfigView")
+    )
+
+    with pytest.raises(UnknownConfigKindError) as excinfo:
+        mw.MainWindow(workspace_root=five_app_workspace)
+    # Every registered app got its adapter; the unsupported one got none. A
+    # fallback would add a sixth record (and, for StructuredConfigView, raise
+    # from the wrong site), so this pins the branch rather than just the class.
+    assert created == [
+        (
+            app_id,
+            "AppDetailView"
+            if registered[app_id].config_kind == "llm"
+            else "StructuredConfigView",
+        )
+        for app_id in registered
+    ]
+    # The captured traceback keeps the ``__init__`` frame (and with it the
+    # half-built window) alive. Drop it and collect the window/tray cycle so no
+    # orphan top-level widget outlives this test.
+    assert excinfo.value.kind == "quantum"
+    error = excinfo.value
+    del excinfo, error
+    gc.collect()
 
 
 @pytest.mark.parametrize("gate", [None, LauncherProbeResult(False, "old launcher")])

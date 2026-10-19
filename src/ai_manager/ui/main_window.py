@@ -3,7 +3,7 @@ import json
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 from PyQt6.QtCore import QThreadPool, QTimer, Qt, pyqtSlot
 from PyQt6.QtGui import QCloseEvent, QColor, QHideEvent, QPalette, QShowEvent
 from PyQt6.QtWidgets import (
@@ -71,6 +71,12 @@ from ai_manager.ui.theme import get_stylesheet
 from ai_manager.utils.path_locator import find_ai_workspace_root
 
 
+# Refusal shown whenever a payload does not match the app's config kind.
+PAYLOAD_KIND_MISMATCH = (
+    "Configuration draft does not match this app's config kind; save refused."
+)
+
+
 def get_settings_file_path() -> Path:
     config_dir = Path.home() / ".config" / "ai-manager"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -114,8 +120,8 @@ class MainWindow(QMainWindow):
 
         # State storage. Saved/draft payloads are typed by config kind: an
         # ``AppAIConfig`` for LLM apps and a ``StructuredDoc`` otherwise.
-        self._saved_configs: Dict[str, Any] = {}
-        self._draft_configs: Dict[str, Any] = {}
+        self._saved_configs: Dict[str, object] = {}
+        self._draft_configs: Dict[str, object] = {}
         self._launcher_gate_cache: Dict[Path, Optional[LauncherProbeResult]] = {}
         self._probe_jobs: Dict[Path, LauncherProbeJob] = {}
         self._save_jobs: Dict[str, StructuredSaveJob] = {}
@@ -320,6 +326,12 @@ class MainWindow(QMainWindow):
             raise UnknownConfigKindError(kind)
         if draft is None:
             return False
+        # Saved/draft payloads are ``object``: an LLM app holds an
+        # ``AppAIConfig`` and a structured app holds a ``StructuredDoc``. Narrow
+        # to the structured records here instead of widening the annotations.
+        if not isinstance(draft, StructuredDoc) or not isinstance(saved, StructuredDoc):
+            # Without a structured baseline nothing can compare equal.
+            return True
         if draft.create_requested:
             return True
         if not draft.existed:
@@ -354,9 +366,7 @@ class MainWindow(QMainWindow):
         else:
             raise UnknownConfigKindError(meta.config_kind)
         if not valid:
-            raise ConfigError(
-                "Configuration draft does not match this app's config kind; save refused."
-            )
+            raise ConfigError(PAYLOAD_KIND_MISMATCH)
 
     def _on_config_changed(self, app_id: str, new_draft: object) -> None:
         try:
@@ -375,6 +385,8 @@ class MainWindow(QMainWindow):
         try:
             self._check_payload(app_id, config)
             if meta.config_kind == "llm":
+                if not isinstance(config, AppAIConfig):
+                    raise ConfigError(PAYLOAD_KIND_MISMATCH)
                 write_app_config(meta, config)
                 self._saved_configs[app_id] = config.model_copy(deep=True)
                 self._draft_configs[app_id] = config.model_copy(deep=True)
@@ -388,6 +400,8 @@ class MainWindow(QMainWindow):
                 return
             if meta.config_kind not in ("chat2api", "file-bridge"):
                 raise UnknownConfigKindError(meta.config_kind)
+            if not isinstance(config, StructuredDoc):
+                raise ConfigError(PAYLOAD_KIND_MISMATCH)
             if not config.existed and not config.create_requested:
                 raise ConfigError("Create a draft from the example before saving.")
             selected = self._resolve_dependents(meta, config)
@@ -609,6 +623,8 @@ class MainWindow(QMainWindow):
                 try:
                     current = error.path.read_bytes()
                     draft = self._draft_configs[app_id]
+                    if not isinstance(draft, StructuredDoc):
+                        raise ConfigError("The current draft is not a structured document.")
                     ReviewChangesDialog(
                         current, render(draft.kind, draft), error.path, self
                     ).exec()
