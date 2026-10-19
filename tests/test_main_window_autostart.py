@@ -90,7 +90,7 @@ def test_constructor_requests_one_attempt(qtbot, tmp_path, monkeypatch, recorder
     monkeypatch.setattr(
         SupervisorManager,
         "start_if_not_running",
-        lambda self: calls.append(True) or False,
+        lambda self: calls.append(True) or True,
     )
     refreshed = []
     monkeypatch.setattr(
@@ -101,6 +101,8 @@ def test_constructor_requests_one_attempt(qtbot, tmp_path, monkeypatch, recorder
     qtbot.addWidget(win)
     win._poll_timer.stop()
 
+    # The spy returns True (a claim); the constructor must not add its own
+    # refresh on top of the entry point.
     assert calls == [True]
     assert refreshed == []
 
@@ -153,12 +155,15 @@ def test_close_event_unsaved_prompt_path_keeps_the_attempt_until_confirmed(
     window.settings.close_to_tray = False
     monkeypatch.setattr(window, "has_unsaved_changes", lambda: True)
 
+    window.show()
+    assert window.isVisible()
     assert_constructor_claim(window)
 
     monkeypatch.setattr(
         QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Cancel
     )
-    window.close()
+    assert window.close() is False, "Cancel must ignore the close event"
+    assert window.isVisible() is True
     manager = window.supervisor_manager
     assert manager.claim_is_live() is True
     assert manager._autostart_epoch is not None
@@ -181,15 +186,22 @@ def test_direct_app_quit_cancels_via_about_to_quit(tmp_path):
     `aboutToQuit` connection rather than `_exit_application` (which `app.quit()`
     never calls).
     """
+    # Interpolated values are bound to locals first: an interpolation that starts
+    # a line would make textwrap.dedent leave the block indented.
+    src_dir = str(Path.cwd() / "src")
+    root_dir = str(Path.cwd())
+    fixtures_dir = str(Path(__file__).parent / "fixtures")
+    tmp_dir = str(tmp_path)
+    env_name = AUTOSTART_DISABLE_ENV
     script = textwrap.dedent(
         f"""
         import os, sys, pathlib, shutil
-        os.environ.pop({AUTOSTART_DISABLE_ENV!r}, None)   # opt in, or this is vacuous
+        os.environ.pop({env_name!r}, None)   # opt in, or this is vacuous
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        sys.path.insert(0, {str(Path.cwd() / "src")!r})
-        sys.path.insert(0, {str(Path.cwd())!r})
+        sys.path.insert(0, {src_dir!r})
+        sys.path.insert(0, {root_dir!r})
 
-        from PyQt6.QtCore import QTimer
+        from PyQt6.QtCore import QProcess, QTimer
         from PyQt6.QtWidgets import QApplication
         from ai_manager.services import supervisor as sup
         from tests.helpers import install_fake_status_process
@@ -209,8 +221,8 @@ def test_direct_app_quit_cancels_via_about_to_quit(tmp_path):
         mw.load_user_settings = lambda: UserSettings()
         mw.save_user_settings = lambda s: None
 
-        tmp = pathlib.Path({str(tmp_path)!r})
-        fixtures = pathlib.Path({str(Path(__file__).parent / "fixtures")!r})
+        tmp = pathlib.Path({tmp_dir!r})
+        fixtures = pathlib.Path({fixtures_dir!r})
         for name in ("ai-grammar", "textkit", "yt2txt"):
             (tmp / name / "backend").mkdir(parents=True, exist_ok=True)
         for src, dest in [
@@ -251,6 +263,18 @@ def test_direct_app_quit_cancels_via_about_to_quit(tmp_path):
             os._exit(4)                    # claim survived the quit
         if manager._autostart_epoch is not None:
             os._exit(9)                    # instance field not cleared
+
+        # A late stopped result after quit must not start anything.
+        manager._status_process.finish()
+        manager._status_output_buffer.clear()
+        # chr(10) rather than a backslash-n: inside this f-string a backslash-n
+        # would become a real newline in the child source and break its indent.
+        manager._status_output_buffer.extend(
+            b"[2026-10-04 11:47:44] supervisor not running" + bytes([10])
+        )
+        manager._on_status_finished(0, QProcess.ExitStatus.NormalExit)
+        if rec:
+            os._exit(10)                   # spawn after quit
         os._exit(0)
         """
     )
@@ -277,18 +301,18 @@ def test_manual_start_from_another_window_cancels_pending_attempt(
     manager_a = window.supervisor_manager
     assert_constructor_claim(window)
 
-    # A second window cannot claim the process-wide attempt.
-    monkeypatch.setattr(
-        SupervisorManager, "start_if_not_running", lambda self: False, raising=True
-    )
+    # B is constructed through the real entry point: the process-wide attempt is
+    # already consumed, so B must not claim and must not launch a probe.
     second = MainWindow(workspace_root=tmp_path)
     qtbot.addWidget(second)
     second._poll_timer.stop()
-    assert second.supervisor_manager.claim_is_live() is False
+    manager_b = second.supervisor_manager
+    assert manager_b.claim_is_live() is False
+    assert manager_b._status_process.starts == [], "B must not probe for autostart"
 
-    second.supervisor_manager.start_supervisor()
+    manager_b.start_supervisor()
     manual = [list(argv) for argv in recorder]
-    assert manual == [[second.supervisor_manager.executable, "start"]]
+    assert manual == [[manager_b.executable, "start"]]
 
     deliver(manager_a, SAMPLE_STOPPED_OUTPUT)
     assert [list(argv) for argv in recorder] == manual

@@ -114,8 +114,10 @@ def test_is_one_shot_across_repeated_entry_calls(manager, recorder):
     deliver(manager, SAMPLE_STOPPED_OUTPUT)
     assert len(recorder.argv) == 1
 
-    # The successful start requested a follow-up probe; complete it so the busy
-    # guard cannot mask a missing one-shot guard.
+    # The successful start must have requested a follow-up probe; complete it so
+    # the busy guard cannot mask a missing one-shot guard.
+    assert len(manager._status_process.starts) == 2, "follow-up probe was not requested"
+    assert manager._status_process.state() == QProcess.ProcessState.Running
     deliver(manager, SAMPLE_RUNNING_OUTPUT)
     assert manager._status_process.state() == QProcess.ProcessState.NotRunning
     starts_before = len(manager._status_process.starts)
@@ -152,18 +154,21 @@ def test_probe_failure_does_not_start_and_a_later_status_cannot_rearm(manager, r
     assert recorder.argv == []
 
 
-def test_unrecognised_output_never_starts(qtbot, tmp_path, autostart_enabled, recorder, monkeypatch):
+def test_unrecognised_output_never_starts(tmp_path, autostart_enabled, monkeypatch):
     for output in ("", UNRECOGNISED_OUTPUT, SAMPLE_RUNNING_OUTPUT + SAMPLE_STOPPED_OUTPUT):
         monkeypatch.setattr(SupervisorManager, "_autostart_consumed", False)
         monkeypatch.setattr(SupervisorManager, "_autostart_cancel_epoch", 0)
-        recorder.argv.clear()
+        case_recorder = Recorder()
+        monkeypatch.setattr(
+            "ai_manager.services.supervisor.subprocess.Popen", case_recorder
+        )
         case = SupervisorManager(workspace_root=tmp_path)
         case._status_process = FakeStatusProcess()
 
         arm(case)
         deliver(case, output)
 
-        assert recorder.argv == [], f"output={output!r}"
+        assert case_recorder.argv == [], f"output={output!r}"
 
 
 def test_nonzero_exit_never_starts(manager, recorder):
@@ -262,6 +267,9 @@ def test_followup_probe_requested_only_after_a_successful_automatic_start(
         arm(case)
         for output in deliveries:
             deliver(case, output)
+        # Let the fake settle so the next sub-case starts from a clean probe state.
+        case._status_process.finish()
+        SupervisorManager._autostart_cancel_epoch += 1
         return len(requests)
 
     assert run_case([SAMPLE_STOPPED_OUTPUT]) == 2        # initial + follow-up
@@ -308,6 +316,23 @@ def test_only_the_claiming_manager_may_complete_the_claim(tmp_path, recorder, mo
     assert recorder.argv == [[a.executable, "start"]]
 
 
+def test_another_managers_poll_cannot_consume_or_authorise_the_claim(
+    tmp_path, recorder, monkeypatch, autostart_enabled
+):
+    a = fresh_manager(tmp_path, monkeypatch)
+    b = fresh_manager(tmp_path, monkeypatch)
+
+    # B's ordinary poll is in flight and stays there while A claims.
+    b.refresh_status()
+    arm(a)
+
+    deliver(b, SAMPLE_STOPPED_OUTPUT)
+    assert recorder.argv == []
+
+    deliver(a, SAMPLE_STOPPED_OUTPUT)
+    assert recorder.argv == [[a.executable, "start"]]
+
+
 def test_status_receiver_that_stops_wins(manager, recorder):
     manager.status_updated.connect(lambda _status: manager.stop_supervisor())
 
@@ -324,7 +349,8 @@ def test_reentrant_status_receiver_cannot_double_start(manager, recorder):
         if fired["once"]:
             return
         fired["once"] = True
-        # A receiver that synchronously drives another probe to completion.
+        # A receiver that synchronously requests another probe and completes it.
+        manager.refresh_status()
         deliver(manager, SAMPLE_STOPPED_OUTPUT)
 
     manager.status_updated.connect(reentrant)
@@ -334,3 +360,8 @@ def test_reentrant_status_receiver_cannot_double_start(manager, recorder):
 
     starts = [a for a in recorder.argv if a[1] == "start"]
     assert len(starts) == 1, f"re-entrant receiver caused {len(starts)} starts"
+    # The outer callback's follow-up probe is still in flight; completing it as
+    # running must not produce a second start either.
+    assert manager._status_process.state() == QProcess.ProcessState.Running
+    deliver(manager, SAMPLE_RUNNING_OUTPUT)
+    assert len([a for a in recorder.argv if a[1] == "start"]) == 1
