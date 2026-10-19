@@ -65,3 +65,15 @@ def test_legacy_dispatch_does_not_materialize_structured_examples(five_app_works
     bad = apps["ai-grammar"].model_copy(update={"config_kind": "plugin-kind"})
     with pytest.raises(UnknownConfigKindError):
         read_app_config(bad)
+
+
+def test_chat2api_preset_uses_the_backend_variable_name():
+    """The editor's preset must reference the env var chat2api actually reads.
+
+    ``CHAT2API_API_KEY`` was never read by the bridge, so picking the preset
+    silently produced 401 responses. The structured schema, the auth warning and
+    the shipped example config all use ``CHAT2API_TOKEN``.
+    """
+    preset = next(p for p in DEFAULT_PRESETS if p.id == "chat2api_local")
+    assert preset.default_key_env_var == "CHAT2API_TOKEN"
+    assert preset.api_base == "http://127.0.0.1:8000"

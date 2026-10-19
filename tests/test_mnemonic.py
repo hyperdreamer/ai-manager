@@ -207,34 +207,16 @@ def test_settings_dialog_has_no_unescaped_ampersands(qtbot):
     ]
 
 
-def test_main_window_has_no_unescaped_ampersands(qtbot, tmp_path, monkeypatch):
+def test_main_window_has_no_unescaped_ampersands(qtbot, five_app_workspace, monkeypatch):
     """Sweep the whole window, including the system-tray context menu."""
-    import shutil
-    from pathlib import Path
-
     from ai_manager.config.models import UserSettings
     from ai_manager.ui import main_window as main_window_module
     from ai_manager.ui.main_window import MainWindow
 
-    fixtures_dir = Path(__file__).parent / "fixtures"
-    for app_id in ["ai-grammar", "textkit", "yt2txt"]:
-        (tmp_path / app_id / "backend").mkdir(parents=True)
-    shutil.copy2(
-        fixtures_dir / "ai_grammar_config.yaml",
-        tmp_path / "ai-grammar" / "backend" / "config.yaml",
-    )
-    shutil.copy2(
-        fixtures_dir / "textkit_unified_config.yaml",
-        tmp_path / "textkit" / "backend" / "config.yaml",
-    )
-    shutil.copy2(
-        fixtures_dir / "yt2txt_config.yaml",
-        tmp_path / "yt2txt" / "backend" / "config.yaml",
-    )
     monkeypatch.setattr(main_window_module, "load_user_settings", lambda: UserSettings())
     monkeypatch.setattr(main_window_module, "save_user_settings", lambda s: None)
 
-    window = MainWindow(workspace_root=tmp_path)
+    window = MainWindow(workspace_root=five_app_workspace)
     qtbot.addWidget(window)
 
     assert find_unescaped_ampersand_sinks(window) == []
@@ -269,3 +251,47 @@ def test_app_detail_view_escapes_dynamic_model_names(qtbot):
     # Escaping is display-only: clicking a chip still applies the raw name.
     chips[1].click()
     assert view.get_current_draft().model == "qwen&co/7b"
+
+
+def test_structured_views_and_blast_names_escape_only_mnemonic_sinks(
+    qtbot, five_app_workspace
+):
+    import json
+    from dataclasses import replace
+
+    from ai_manager.config.app_registry import get_managed_apps
+    from ai_manager.config.blast_radius import find_affected_dependents
+    from ai_manager.config.structured_config import load
+    from ai_manager.config.structured_models import Mutation
+    from ai_manager.ui.config_dialogs import BlastRadiusDialog
+    from ai_manager.ui.structured_config_view import StructuredConfigView
+
+    apps = get_managed_apps(five_app_workspace)
+    path = apps["chat2api"].relative_path / "config.json"
+    tree = json.loads(path.read_bytes())
+    tree["models"]["qwen&co/7b"] = tree["models"].pop("echo-1")
+    path.write_text(json.dumps(tree))
+    before = load("chat2api", path)
+    for app_id in ("chat2api", "file-bridge"):
+        view = StructuredConfigView(apps[app_id])
+        qtbot.addWidget(view)
+        view.load_config(
+            load(
+                apps[app_id].config_kind,
+                apps[app_id].relative_path / apps[app_id].config_file_name,
+            )
+        )
+        assert find_unescaped_ampersand_sinks(view) == []
+        if app_id == "chat2api":
+            assert view._model.rows[0].name == "qwen&co/7b"
+        else:
+            view._fields[("save_root",)].edit.setText("../A&B")
+            assert view.get_current_draft().mutations[0].value == "../A&B"
+    apps["textkit"] = apps["textkit"].model_copy(
+        update={"display_name": "Text & Toolkit"}
+    )
+    after = replace(before, mutations=(Mutation(("server", "port"), "set", 8123),))
+    dialog = BlastRadiusDialog(find_affected_dependents(apps, before, after))
+    qtbot.addWidget(dialog)
+    assert "Text && Toolkit" in dialog._checks["textkit"].text()
+    assert find_unescaped_ampersand_sinks(dialog) == []

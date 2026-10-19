@@ -28,6 +28,8 @@ from ai_manager.config.models import (
     AppAIConfig,
     ModelFetchRequest,
     ModelFetchResponse,
+    ServiceRunState,
+    ServiceStatus,
 )
 from ai_manager.config.structured_config import load, render
 from ai_manager.config.structured_models import (
@@ -415,3 +417,204 @@ def test_probe_once_per_resolved_directory_and_completion_keeps_other_controls(w
     )
     window._production_start_launcher_probes()
     assert not window._probe_jobs
+
+
+def test_actual_worker_completion_is_queued_and_gui_remains_responsive(
+    qtbot, window, monkeypatch
+):
+    from threading import Event
+
+    from PyQt6.QtCore import QThread, QThreadPool, QTimer
+
+    from ai_manager.config import structured_config as sc
+
+    entered, release = Event(), Event()
+    observed = []
+
+    def blocked_commit(*args, **kwargs):
+        observed.append(("worker", QThread.currentThread()))
+        entered.set()
+        assert release.wait(5), "test did not release worker"
+        raise ServiceValidationError(3, "", "queued stderr\n")
+
+    monkeypatch.setattr(sc, "commit", blocked_commit)
+    view = window.views["chat2api"]
+    original = view.show_config_error
+
+    def checked_message(message, detail=None):
+        observed.append(("gui", QThread.currentThread()))
+        assert QThread.currentThread() is window.thread()
+        return original(message, detail)
+
+    monkeypatch.setattr(view, "show_config_error", checked_message)
+    pool = QThreadPool(window)
+    window.thread_pool = pool
+    window._on_config_changed("chat2api", port_draft(window))
+    try:
+        window._on_save_requested("chat2api", port_draft(window), True)
+        qtbot.waitUntil(entered.is_set)
+        ticks = []
+        QTimer.singleShot(0, lambda: (view._tabs.setCurrentIndex(1), ticks.append(True)))
+        qtbot.waitUntil(lambda: bool(ticks))
+        assert "chat2api" in window._save_jobs and not view._save_only_btn.isEnabled()
+        release.set()
+        qtbot.waitUntil(lambda: not window._save_jobs)
+        assert any(
+            role == "worker" and thread is not window.thread()
+            for role, thread in observed
+        )
+        assert any(role == "gui" for role, thread in observed)
+        assert view._details.toPlainText() == "queued stderr\n"
+        window.supervisor_manager.restart_service.assert_not_called()
+    finally:
+        release.set()
+        assert pool.waitForDone(5000)
+
+
+def test_fetch_reverse_delivery_equal_tokens_and_late_token(qtbot, window, monkeypatch):
+    from ai_manager.services.model_fetcher import ModelFetchSignals
+
+    workers = []
+
+    class ControlledWorker:
+        def __init__(self, request):
+            self.request, self.signals = request, ModelFetchSignals()
+            workers.append(self)
+
+    monkeypatch.setattr(mw, "ModelFetchWorker", ControlledWorker)
+    grammar, textkit = window.views["ai-grammar"], window.views["textkit"]
+    grammar._on_fetch_clicked()
+    textkit._on_fetch_clicked()
+    window.sidebar.select_app("chat2api")
+    assert workers[0].request.app_id == "ai-grammar"
+    assert workers[1].request.app_id == "textkit"
+    assert workers[0].request.token == workers[1].request.token == 1
+    workers[1].signals.finished.emit(
+        ModelFetchResponse(token=1, success=True, models=["textkit-only"])
+    )
+    workers[0].signals.finished.emit(
+        ModelFetchResponse(token=1, success=True, models=["grammar-only"])
+    )
+    qtbot.waitUntil(lambda: not window._model_workers)
+    assert "grammar-only" in grammar._available_models
+    assert "grammar-only" not in textkit._available_models
+    assert "textkit-only" in textkit._available_models
+    assert "textkit-only" not in grammar._available_models
+    grammar._on_fetch_clicked()
+    window._on_models_fetched(
+        "ai-grammar", ModelFetchResponse(token=1, success=True, models=["stale-model"])
+    )
+    assert "stale-model" not in grammar._available_models
+    workers[-1].signals.finished.emit(
+        ModelFetchResponse(token=2, success=True, models=["fresh-model"])
+    )
+    qtbot.waitUntil(lambda: not window._model_workers)
+    assert "fresh-model" in grammar._available_models
+
+
+@pytest.mark.parametrize(
+    "app_id,key,value",
+    [("chat2api", ("server", "port"), 8123), ("file-bridge", ("port",), 8970)],
+)
+def test_port_cache_survives_status_dirty_redraw_and_unreadable_reload(
+    qtbot, window, monkeypatch, app_id, key, value
+):
+    saved = window._saved_configs[app_id]
+    run_save(
+        qtbot,
+        window,
+        monkeypatch,
+        app_id=app_id,
+        draft=replace(saved, mutations=(Mutation(key, "set", value),)),
+    )
+    window.sidebar.select_app(app_id)
+    window.sidebar.set_dirty(app_id, True)
+    window.sidebar.update_status(
+        app_id, ServiceStatus(service_id=app_id, state=ServiceRunState.RUNNING, pid=1)
+    )
+    assert f"Port {value}" in window.sidebar._list_widget.currentItem().text()
+    assert f"Port {value}" in window.views[app_id]._title_label.text()
+    assert window.apps[app_id].default_port == (
+        8000 if app_id == "chat2api" else 8964
+    )
+    window._saved_configs[app_id].path.write_bytes(b"[]\n")
+    window._reload_config(app_id)
+    assert app_id not in window.sidebar._configured_ports
+    assert (
+        f"Port {window.apps[app_id].default_port}"
+        in window.sidebar._list_widget.currentItem().text()
+    )
+
+
+def test_auth_warning_uses_current_dependent_draft_without_key_write(window):
+    draft = replace(
+        window._saved_configs["chat2api"],
+        mutations=(Mutation(("server", "auth_token_env"), "set", "CHAT2API_TOKEN"),),
+    )
+    window._on_config_changed("chat2api", draft)
+    dependent = window._draft_configs["ai-grammar"].model_copy(
+        update={"api_key": "$OTHER_TOKEN"}
+    )
+    window._on_config_changed("ai-grammar", dependent)
+    expected = (
+        "ai-grammar uses $OTHER_TOKEN, but chat2api auth_token_env is "
+        "'CHAT2API_TOKEN'; requests may fail with HTTP 401."
+    )
+    assert expected in window.views["chat2api"]._auth_label.text()
+    assert (
+        b'api_key: "$CHAT2API_TOKEN"'
+        in (window.apps["ai-grammar"].relative_path / "config.yaml").read_bytes()
+    )
+    disabled = replace(
+        draft, mutations=(Mutation(("server", "auth_token_env"), "set", None),)
+    )
+    window._on_config_changed("chat2api", disabled)
+    assert not window.views["chat2api"]._auth_label.text()
+
+
+def test_blast_cancel_prevents_worker_and_target_changes(window, monkeypatch):
+    monkeypatch.setattr(
+        mw.BlastRadiusDialog, "exec", lambda self: QDialog.DialogCode.Rejected
+    )
+    draft = port_draft(window)
+    window._on_config_changed("chat2api", draft)
+    original = draft.path.read_bytes()
+    window._on_save_requested("chat2api", draft, True)
+    assert not window._save_jobs and not window._pending_restarts
+    assert draft.path.read_bytes() == original and window._is_dirty("chat2api")
+    window.supervisor_manager.restart_service.assert_not_called()
+
+
+def test_saved_notice_preserves_validator_details_until_next_load(
+    qtbot, window, monkeypatch
+):
+    """``Configuration saved.`` must not erase the validation evidence.
+
+    ``set_validation_result`` installs the notice and details after a commit.
+    The plain success notice that follows passes no detail, so the validator
+    output has to survive; only loading a different config clears it.
+    """
+    import ai_manager.services.service_validation as validation
+
+    monkeypatch.setattr(
+        validation,
+        "validate_candidate",
+        lambda *a: ValidationResult(
+            "service",
+            "Validated by the chat2api service validator.",
+            "exact validator stdout\n",
+        ),
+    )
+    draft = port_draft(window)
+    window._on_config_changed("chat2api", draft)
+    window._on_save_requested("chat2api", draft, False)
+    window._save_jobs["chat2api"].run()
+    qtbot.waitUntil(lambda: not window._save_jobs)
+    view = window.views["chat2api"]
+    assert view._notice_label.text() == "Configuration saved."
+    assert view._validation_label.text() == "Validated by the chat2api service validator."
+    assert view._details.toPlainText() == "exact validator stdout\n"
+    # Loading a different configuration starts a fresh validation cycle.
+    window._reload_config("chat2api")
+    assert view._details.toPlainText() == ""
+    assert view._validation_label.text() == "Not validated since load."

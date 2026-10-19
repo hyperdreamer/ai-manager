@@ -852,8 +852,14 @@ class StructuredConfigView(QWidget):
         self._readonly_label.setText("\n".join(lines))
         self._controls()
 
-    def show_config_error(self, message, detail=None) -> None:
-        self._notice_label.setText(message)
+    def show_config_error(self, message: object, detail: str | None = None) -> None:
+        """Show a plain-text outcome; ``None`` keeps the validator details.
+
+        ``ValidationResult`` details are set separately by
+        ``set_validation_result``. Omitting ``detail`` therefore preserves them,
+        while an explicit string (including ``""``) always replaces them.
+        """
+        self._notice_label.setText(str(message))
         if detail is not None:
             # Omitted detail preserves the validator output already displayed.
             self._details.setPlainText(detail)

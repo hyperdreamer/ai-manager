@@ -405,6 +405,11 @@ class MainWindow(QMainWindow):
             if not config.existed and not config.create_requested:
                 raise ConfigError("Create a draft from the example before saving.")
             selected = self._resolve_dependents(meta, config)
+            if selected is None:
+                # The user declined the dependent rewrite: nothing is staged,
+                # the draft stays dirty and no restart is requested.
+                self._set_dirty_indicator(app_id)
+                return
             job = StructuredSaveJob(meta, config, selected)
             self._save_jobs[app_id] = job
             self._pending_restarts[app_id] = bool(should_restart)
@@ -417,11 +422,19 @@ class MainWindow(QMainWindow):
             )
             self.thread_pool.start(job)
         except ConfigError as exc:
-            view.set_save_in_progress(False)
-            view.show_config_error(str(exc), getattr(exc, "stderr", "") or "")
+            self._on_structured_save_failed(app_id, exc)
+        except Exception as exc:
+            self._on_structured_save_failed(
+                app_id, ConfigError(f"Configuration save failed: {exc}")
+            )
 
     def _resolve_dependents(self, meta, config):
-        """Gate listener changes and return the user-selected dependent set."""
+        """Gate listener changes and return the user-selected dependent set.
+
+        Returns ``None`` when the blast-radius dialog was declined, which is
+        distinct from an empty tuple: an empty tuple means "no dependents to
+        rewrite" and still commits the primary configuration.
+        """
         if meta.config_kind != "chat2api":
             return ()
         previous = self._saved_configs.get(meta.id)
@@ -456,7 +469,7 @@ class MainWindow(QMainWindow):
             return ()
         dialog = BlastRadiusDialog(matches, self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
-            return ()
+            return None
         selected_ids = set(dialog.selected_app_ids())
         return tuple(match for match in matches if match.meta.id in selected_ids)
 

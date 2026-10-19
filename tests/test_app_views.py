@@ -254,3 +254,32 @@ def test_sidebar_update_configured_port_validates_id_and_range(qtbot):
     sidebar.update_configured_port("chat2api", 1)
     sidebar.update_configured_port("chat2api", 65535)
     assert sidebar._configured_ports["chat2api"] == 65535
+
+
+def test_sidebar_saved_port_strictness_and_llm_baseline_adoption(qtbot, tmp_path):
+    import pytest
+
+    apps = get_managed_apps(tmp_path)
+    sidebar = AppSidebar(apps)
+    qtbot.addWidget(sidebar)
+    assert sidebar._list_widget.count() == 5
+    sidebar.update_configured_port("chat2api", 8123)
+    sidebar.select_app("chat2api")
+    sidebar.set_dirty("chat2api", True)
+    assert "Port 8123" in sidebar._list_widget.currentItem().text()
+    sidebar.update_configured_port("chat2api", None)
+    assert "Port 8000" in sidebar._list_widget.currentItem().text()
+    view = AppDetailView(apps["ai-grammar"])
+    qtbot.addWidget(view)
+    old = AppAIConfig(api_base="http://127.0.0.1:8000", model="original")
+    new = old.model_copy(update={"api_base": "http://127.0.0.1:8123"})
+    view.load_config(old)
+    view._model_combo.setEditText("draft-only")
+    draft = view.get_current_draft()
+    changed = []
+    view.config_changed.connect(lambda *args: changed.append(args))
+    view.adopt_saved_baseline(new, preserve_draft=True)
+    assert view.get_current_draft() == draft and view._current_config == new
+    assert not changed
+    view.adopt_saved_baseline(new, preserve_draft=False)
+    assert view.get_current_draft() == new and not changed

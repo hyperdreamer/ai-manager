@@ -22,3 +22,29 @@ def test_full_workspace_integration(five_app_workspace):
             assert doc["port"] == 8964
         else:
             raise AssertionError(meta.config_kind)
+
+
+def test_five_widget_dispatch(qtbot, five_app_workspace):
+    from ai_manager.ui.app_detail_view import AppDetailView
+    from ai_manager.ui.main_window import MainWindow
+    from ai_manager.ui.structured_config_view import StructuredConfigView
+
+    window = MainWindow(workspace_root=five_app_workspace)
+    qtbot.addWidget(window)
+    assert list(window.views) == [
+        "ai-grammar",
+        "textkit",
+        "yt2txt",
+        "chat2api",
+        "file-bridge",
+    ]
+    assert all(
+        isinstance(window.views[a], AppDetailView)
+        for a in ("ai-grammar", "textkit", "yt2txt")
+    )
+    assert all(
+        isinstance(window.views[a], StructuredConfigView)
+        for a in ("chat2api", "file-bridge")
+    )
+    assert window.sidebar.current_app_id() == "ai-grammar"
+    assert not window.has_unsaved_changes()

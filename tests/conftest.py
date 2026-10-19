@@ -78,6 +78,12 @@ cache:
 
 @pytest.fixture
 def five_app_workspace(tmp_path):
+    """Create the five registered application directories with real configs.
+
+    Window-level tests build against this workspace instead of a copy of the
+    three legacy LLM fixtures, so every lifecycle assertion also covers the two
+    structured applications.
+    """
     (tmp_path / "storage").mkdir()
     for app_id, meta in get_managed_apps(tmp_path).items():
         meta.relative_path.mkdir(parents=True)
