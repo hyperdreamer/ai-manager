@@ -98,7 +98,7 @@ def test_version_consumers_import_the_symbol():
             for node in ast.walk(tree)
         ), relative
         assert re.search(
-            r"(?<![\d.])\d+\.\d+\.\d+(?![\d.])", source
+            r"(?<![\d.])\d+\.\d+\.\d+(?!\d)(?!\.\d)", source
         ) is None, relative
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
