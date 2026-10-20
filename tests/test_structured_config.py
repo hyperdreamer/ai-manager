@@ -605,3 +605,41 @@ def test_normal_nesting_still_loads(tmp_path):
     path.write_text(json.dumps(document), encoding="utf-8")
 
     assert load("chat2api", path).existed is True
+
+
+def test_deep_example_without_models_is_rejected_not_copied(tmp_path):
+    """The depth guard must run before the "no models" early return.
+
+    A chat2api document with no ``models`` key used to skip the depth check, so a
+    deeply nested example passed shape validation and then raised RecursionError
+    inside ``load_example``'s deep copy - outside the exception translation, in a
+    Qt slot, which aborted the process.
+    """
+    from ai_manager.config.config_errors import ConfigShapeError
+    from ai_manager.config.structured_config import MAX_CONFIG_DEPTH, load_example
+
+    example = {"server": {"port": 8123}, "future": []}
+    cursor = example["future"]
+    for _ in range(MAX_CONFIG_DEPTH + 20):
+        cursor.append([])
+        cursor = cursor[0]
+
+    example_path = tmp_path / "config.example.json"
+    example_path.write_text(json.dumps(example), encoding="utf-8")
+
+    with pytest.raises(ConfigShapeError) as excinfo:
+        load_example("chat2api", tmp_path / "config.json", example_path)
+
+    # The real reason must be reported, not "missing example".
+    assert "nested more than" in str(excinfo.value)
+
+
+def test_shallow_example_without_models_still_creates_a_draft(tmp_path):
+    from ai_manager.config.structured_config import load_example
+
+    example_path = tmp_path / "config.example.json"
+    example_path.write_text(json.dumps({"server": {"port": 8123}}), encoding="utf-8")
+
+    draft = load_example("chat2api", tmp_path / "config.json", example_path)
+
+    assert draft.create_requested is True

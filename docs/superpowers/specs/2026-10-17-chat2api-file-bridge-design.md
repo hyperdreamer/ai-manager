@@ -671,7 +671,7 @@ because that combination yields 401s that look like a server fault.
 | --- | --- |
 | File changed on disk before commit | Save refused; Reload / Show diff / Cancel (§3, no force path) |
 | In-process rule fails | Save blocked; field marked invalid; inline message |
-| Service validator rejects | Save blocked; exact stderr in expandable panel |
+| Service validator rejects | Save blocked; credential-safe stderr (input values redacted, location and message preserved) in expandable panel |
 | Service validator unavailable | Save allowed with visible degraded notice |
 | Config missing (new kinds) | Empty sections + explicit create-from-example action |
 | Config missing (llm kinds) | Unchanged: auto-create from example |

@@ -1366,7 +1366,7 @@ class StructuredConfigView(QWidget):
 | Save click | Emit `save_requested(app_id, draft, should_restart)` once. MainWindow validates kind/type, resolves blast dialog if applicable, then starts the appropriate save operation. |
 | Stale save result | No additional view signal. MainWindow retains draft/dirty, re-enables editing, displays StaleDocumentDialog. Reload discards draft and calls `_reload_config`; Show diff reads current disk only; Cancel retains draft. |
 | Manager rule failure | No additional view signal. MainWindow calls `show_field_issues`, keeps draft/dirty and marks relevant fields; save is re-enabled after completion. |
-| Service validator rejection/timeout | No additional view signal. MainWindow calls `show_config_error` with exact stderr in expandable panel, keeps draft/dirty, and does not restart. |
+| Service validator rejection/timeout | No additional view signal. MainWindow calls `show_config_error` with credential-safe stderr (field location and message preserved, input values redacted) in expandable panel, keeps draft/dirty, and does not restart. |
 | Service validator unavailable | Save continues; the returned validation result is displayed inline and persists after successful save. |
 | Successful save | MainWindow installs saved baseline, clears primary dirty, updates ports, and reconciles selected dependents. Only then may it send restart. Loading committed widgets emits no edit signals. |
 | Restart click | Emit `restart_requested(app_id)`; MainWindow calls `SupervisorManager.restart_service(app_id)`. No config write or dirty clear. |
@@ -1607,7 +1607,7 @@ Internal unexpected I/O/path failures append their OS detail to the general load
 | `ReadOnlyConfigError` | Render/commit/prepare or bypassed gate | Save worker then MainWindow; refuse, preserve draft and reason. |
 | `ConfigValidationError` | Mutation normalization/stage 1/schema boundary | Save worker then MainWindow; mark fields, no target writes. |
 | `InterpreterUnavailableError` | Interpreter resolution/import probe | `validate_candidate` only; convert to manager-only result with detail. |
-| `ServiceValidationError` | Stage-3 nonzero exit other than unavailable code | Save worker then MainWindow; exact stderr panel; no commit/restart. |
+| `ServiceValidationError` | Stage-3 nonzero exit other than unavailable code | Save worker then MainWindow; credential-safe stderr (field location and message preserved, input values redacted) panel; no commit/restart. |
 | `ServiceValidationTimeout` | Stage-3 deadline | Save worker then MainWindow; refusal, child killed/reaped. |
 | `StaleDocumentError` | Explicit create race or transaction prepare | MainWindow; stale choices only, no baseline update until explicit Reload. |
 | `TransactionError` | Backup/stage/replace/rollback filesystem failure | MainWindow; use report phase/state text and all file rows; no restart. |
@@ -2111,7 +2111,7 @@ The fake's shebang interpreter is resolved independently of the candidate `pytho
 | Setup | Required assertions |
 | --- | --- |
 | F-C/F-F, import 0, validator 0 | Scope `service`; correct kind notice; command/cwd exact; candidate bytes equal rendered; hidden candidate parent equals target resolved parent; candidate removed afterward. |
-| Validator 1, stderr `fixture schema error\n` | ServiceValidationError returncode 1 and exact stderr; no commit, no degraded notice. |
+| Validator 1, stderr `fixture schema error\n` | ServiceValidationError returncode 1 and credential-safe stderr (field location and message preserved, input values redacted); no commit, no degraded notice. |
 | Missing interpreter or import exit 1 | Manager-only exact notice; validator not invoked; in-process validation still ran; invalid port still blocks. |
 | Validator import unavailable exit 75 | Manager-only exact notice with captured detail, child reaped and candidate removed. |
 | Validator timeout | ServiceValidationTimeout; kill/reap called; candidate cleaned; no commit. Import timeout instead means interpreter unavailable. |
@@ -2198,7 +2198,7 @@ Use `qtbot` and deterministic stub stage-3/gate outcomes. No live launcher is ne
 - Raw unknown object edit to literal `{"future":{"keep":[1,"雪"]},"headless":false}` changes only that raw key; raw invalid literal `{broken` remains in draft and counts dirty, with correct message; known/secret collision is refused.
 - Review Changes for F-J shows `8000` removed and `8123` added in unified diff, includes unchanged surrounding keys, does not write, and does not mark a clean view dirty. Account/password visibility follows existing draft data in the local diff; no diff is logged or persisted.
 - Read-only F-A/F-BAD/symlink/0444/missing cases show exact catalog messages, disabled saves, and no load-time config/save signals. Gate failure disables only host/port and rewrite; models/auth remain editable. Gate pending has its own text.
-- Stale save/validator rejection leaves get_current_draft unchanged; emits no second save/config_changed/fetch signal. Error detail preserves exact service stderr. Reload choice discards, Cancel preserves, Show diff does not change baseline/hash.
+- Stale save/validator rejection leaves get_current_draft unchanged; emits no second save/config_changed/fetch signal. Error detail preserves the credential-safe service stderr (field location and message kept, input values redacted). Reload choice discards, Cancel preserves, Show diff does not change baseline/hash.
 - Header configured port is 8000/8964 on load and committed value after save, not the unsaved edited value. Status update changes badge and log state with no config signal; reported log path survives a later status without path, falling back only before any report.
 - MainWindow owns dirty computation; switching tabs, selection, row expansion, reveal, and validation label updates cannot set/clear a sidebar dirty flag independently.
 

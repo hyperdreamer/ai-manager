@@ -1079,3 +1079,44 @@ def test_bypass_notice_clears_as_soon_as_the_listener_edit_is_undone(
     # A non-listener edit never produces the bypass notice either.
     view._fields[("server", "auth_token_env")].present.setChecked(False)
     assert "Launcher has not passed" not in view._notice_label.text()
+
+
+def test_create_from_example_survives_an_unexpected_failure(qtbot, tmp_path):
+    """A button handler must never let an exception escape the Qt slot.
+
+    An escaping exception from a slot terminated the process (SIGABRT) rather than
+    showing an error, and the configuration files are user-supplied.
+    """
+    from ai_manager.config.models import AppMetadata
+    from ai_manager.ui import structured_config_view as scv
+
+    meta = AppMetadata(
+        id="chat2api",
+        display_name="chat2api",
+        relative_path=tmp_path,
+        config_file_name="config.json",
+        example_config_file_name="config.example.json",
+        default_port=8000,
+        config_kind="chat2api",
+    )
+    (tmp_path / "config.example.json").write_text("{}\n", encoding="utf-8")
+
+    view = scv.StructuredConfigView(meta)
+    qtbot.addWidget(view)
+
+    errors: list[str] = []
+    view.show_config_error = lambda message, detail="": errors.append(message)
+
+    def boom(*_args, **_kwargs):
+        raise RecursionError("simulated pathological document")
+
+    original = scv.load_example
+    scv.load_example = boom
+    try:
+        # Must not raise: this is what a real button click does.
+        view._create_from_example()
+    finally:
+        scv.load_example = original
+
+    assert errors, "the failure must be reported to the user"
+    assert "example" in errors[0].lower()

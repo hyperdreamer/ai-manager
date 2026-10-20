@@ -93,11 +93,16 @@ def _shape(kind: StructuredKind, path: Path, tree) -> None:
         return
     if "server" in tree and not isinstance(tree["server"], dict):
         raise ConfigShapeError(path, "Server must be a mapping when present; save is disabled.")
+    # Depth is checked before ANY early return. A chat2api document without a
+    # ``models`` key used to skip the guard entirely, so an example file with
+    # deeply nested ``options`` passed shape validation and then raised
+    # RecursionError inside ``load_example``'s deep copy - outside the exception
+    # translation, in a Qt slot, which aborted the process.
+    _check_depth(path, tree)
     if "models" not in tree:
         return
     if not isinstance(tree["models"], dict):
         raise ConfigShapeError(path, "Models must be a mapping; save is disabled.")
-    _check_depth(path, tree)
     for name, route in tree["models"].items():
         if not isinstance(route, dict):
             raise ConfigShapeError(path, f"Model {name!r} must be a mapping; save is disabled.")
@@ -185,11 +190,22 @@ def load_example(kind: StructuredKind, path: Path, example_path: Path) -> Struct
         example = load(kind, example_path)
         if not example.existed:
             raise FileNotFoundError(example_path)
+    except (ConfigShapeError, SymlinkConfigError, ReadOnlyConfigError):
+        # The example exists and was read, but its CONTENT is unusable. Reporting
+        # "missing example" here would send the user looking for the wrong problem,
+        # and swallowing it invites a later copy of an unvalidated tree.
+        raise
     except Exception as exc:
         raise MissingExampleError(example_path, f"Cannot create draft from example: {example_path}") from exc
     reasons = tuple(r for r in target.read_only_reasons if r == "non-writable")
     reasons += tuple(r for r in example.read_only_reasons if r == "yaml-anchors-aliases")
-    return replace(target, doc=copy.deepcopy(example.doc), read_only_reasons=reasons, create_requested=True)
+    try:
+        document = copy.deepcopy(example.doc)
+    except RecursionError:
+        raise ConfigShapeError(
+            example_path, "Example configuration is nested too deeply to edit; save is disabled."
+        ) from None
+    return replace(target, doc=document, read_only_reasons=reasons, create_requested=True)
 
 def _apply(tree, mutation: Mutation) -> None:
     parent = tree

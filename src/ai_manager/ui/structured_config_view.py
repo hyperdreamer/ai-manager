@@ -832,8 +832,18 @@ class StructuredConfigView(QWidget):
             self.show_config_error(exc.detail)
         except ConfigError as exc:
             self.show_config_error(str(exc))
+        except Exception as exc:  # a Qt slot must never abort the process
+            # This runs from a button click. Any unexpected failure - a
+            # RecursionError from a pathological example, a widget rejection - must
+            # surface as a handled error; letting it escape the slot terminates the
+            # application.
+            self.show_config_error(f"Could not create a draft from the example: {exc}")
         else:
-            self.load_config(draft)
+            try:
+                self.load_config(draft)
+            except Exception as exc:
+                self.show_config_error(f"Could not display the new draft: {exc}")
+                return
             self.config_changed.emit(self.app_meta.id, draft)
 
     # -- status surface -------------------------------------------------------
