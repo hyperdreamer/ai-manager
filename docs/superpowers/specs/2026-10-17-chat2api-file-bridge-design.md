@@ -279,8 +279,18 @@ test must:
 7. **Always** terminate and reap the child on every outcome, including timeout
    and assertion failure, so a leaked server cannot poison later runs.
 
-This is a required automated test, not an optional manual probe. The GUI's
-runtime gate uses the same fixture and the same readiness rule.
+This is a required automated test, not an optional manual probe. It runs in
+**Target B's own suite**, where binding a real socket is safe and supervised.
+
+> **Amendment (user decision, pivot question 15).** Revision 4 made the GUI's
+> runtime gate use this same socket-readiness rule. Adversarial review proved that
+> cannot be isolated in-process: the launcher needs its `app/` tree, and any
+> symlink to it exposes the real `config.json` and `.env` to the child, including
+> non-Python children with no audit hook; a `bytes` path also bypasses a `str`
+> deny-list. The GUI gate therefore uses the launcher's `--print-listener`
+> capability instead — stateless, binding nothing, and safe to run while the real
+> service is live. The live-socket proof above remains here, in Target B's tests,
+> and is what makes the capability trustworthy. See spec §7.3.
 
 ## 2. Registry boundary
 

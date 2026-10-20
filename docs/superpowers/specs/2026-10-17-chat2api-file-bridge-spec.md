@@ -1130,38 +1130,73 @@ A probe spawn error, nonzero exit, or timeout raises internal `InterpreterUnavai
 
 Manager and supervisor processes may inherit different PATH/environment values. Import probing establishes usability in the manager's environment; it does not prove that future supervisor startup uses identical ambient state.
 
-### 7.3 Behavioral launcher gate
+### 7.3 Behavioral launcher gate (capability-flag design)
 
-The gate is independent of stage 3: service validation can succeed while an old launcher still ignores host/port. Start one `LauncherProbeJob` for chat2api after view construction, cache its terminal result per session, and keep host/port and dependent rewrite unavailable while pending. Models/auth editing, logs, status and restart controls remain available.
+> **Amendment, approved by the user as design-pivot question 15.** Revision 4 of this
+> section specified a probe that launched `start.sh` and socket-tested the bound port.
+> Adversarial review proved that approach cannot be isolated in-process: the launcher
+> needs its `app/` tree, and any symlink to it exposes the real `config.json` and `.env`
+> to the child, including non-Python children that carry no audit hook. A `bytes` path
+> also bypasses a `str` deny-list, and `os.open(..., dir_fd=...)` resolves relative to a
+> directory descriptor rather than the checked path. The probe was therefore both a
+> credential-leak and a port-collision risk. It is replaced by a capability flag on the
+> launcher itself.
 
-Use this exact config, substituting only the allocated integer port:
+#### 7.3.1 The `--print-listener` capability
 
-```json
-{
-  "server": {
-    "host": "127.0.0.1",
-    "port": 43127,
-    "auth_token_env": null
-  },
-  "models": {
-    "echo-probe": {
-      "provider": "echo"
-    }
-  }
-}
+Target B's `start.sh` accepts `--print-listener`. When present, it:
+
+1. resolves the config exactly as the serving path does (same `PY`, same `load_config`,
+   same cwd);
+2. prints the resolved host and port on separate lines to **stdout**;
+3. exits `0` **before** any uvicorn import, bind, or serve.
+
+It never reads or prints secrets, never binds a socket, and never starts a process tree.
+A launcher predating this flag exits non-zero on the unknown argument, which the gate
+treats as "capability absent".
+
+#### 7.3.2 Gate algorithm
+
+`probe_launcher(app_dir) -> LauncherProbeResult` runs, in the app directory:
+
+```python
+subprocess.run([str(app_dir / "start.sh"), "--print-listener"],
+               cwd=str(app_dir), env=os.environ.copy(),
+               capture_output=True, text=True, timeout=10, shell=False)
 ```
 
-The port literal is an example; allocate with an AF_INET socket bound to `("127.0.0.1", 0)`, read `getsockname()[1]`, close just before spawn, and retry allocation if it happens to equal 8000. The allocation-to-bind race cannot be eliminated when invoking an unmodified launcher; record competing-bind/child-exit as gate failure, not proof of a launcher version.
+- exit `0`, **at least two** non-empty stdout lines, the **last two** being host then
+  port, host in the R-HOST-LOOPBACK set, port an int in 1..65535 -> `passed=True`.
+  (The real launcher prints a version banner first, so earlier lines are ignored; this
+  was established by cross-target acceptance.)
+- exit non-zero, timeout, fewer than two lines, or an out-of-range value ->
+  `passed=False` with the captured stderr as `detail`.
+- The child is `start.sh` only; it is awaited and reaped by `subprocess.run`. No process
+  group is created, no PID is signalled, and nothing survives the call.
 
-Ordered probe algorithm:
+Because nothing binds, the gate may run at any time, on any port state, including while
+the real service is live on 8000. There is no port allocation, no readiness polling, and
+no SIGTERM/SIGKILL escalation.
 
-1. Resolve app directory and ensure `start.sh` can be invoked. Create a temporary probe directory and config (UTF-8 JSON, mode `0o600`); pass its absolute path as `CHAT2API_CONFIG` in a copy of the environment.
-2. Invoke `[str(app_dir / "start.sh")]`, cwd app directory, no uvicorn override arguments, `start_new_session=True`. Capture stdout/stderr into temporary files rather than unread pipes, preventing pipe-buffer deadlock during polling. The probe never reads the user's real config or supplies credentials.
-3. Start a monotonic deadline of 10 seconds. On every iteration, call `poll()` before testing readiness. Any child exit, including code 0 before bind, fails immediately; include captured stderr and return code. Never wait the full timeout after known exit.
-4. Try an AF_INET TCP connection to `127.0.0.1:<allocated>` with at most 100 ms connect timeout. Success while the child is alive satisfies the readiness rule shared with Target B acceptance tests. Check `poll()` once more after connection. Poll at most every 50 ms, bounded by the remaining deadline.
-5. On timeout, return failed result with `Launcher probe timed out after 10 seconds.` and captured diagnostics. An HTTP `/v1/models` check is additional test evidence; TCP acceptance is the gate's required readiness criterion.
-6. In a `finally` on every branch, terminate the spawned process group with SIGTERM if still running; wait/communicate up to 2 seconds; SIGKILL remaining probe processes and wait again. Always `wait()` the direct child even if it exited earlier. Close capture files and remove probe config/directory only after reap. Never signal a production listener's PID.
-7. Only a passed probe unlocks host/port and enables blast-radius rewriting. Failure detail is expandable; it does not turn a missing interpreter into permission to edit listener fields. Do not retry automatically in this session after a failed cached result; restarting ai-manager after installing B starts a new probe.
+#### 7.3.3 What the gate proves, and what it does not
+
+Proves: the installed launcher advertises the capability and reports the same listener
+ai-manager derives from the same config. This is enough to make the editor's host/port
+fields truthful.
+
+Does not prove: that a subsequent restart actually binds successfully (port-in-use,
+missing dependencies, and login/discovery remain runtime concerns), and does not detect a
+supervisor-level `--host`/`--port` override that supersedes config. The end-to-end
+proof that the launcher really binds and serves a non-default port lives in Target B's
+own acceptance test (`tests/test_launcher.py`), not in the GUI gate.
+
+#### 7.3.4 Caching and UI effect
+
+Run once per resolved application directory per `MainWindow` session and cache the
+terminal result. While pending, and on failure, chat2api's `host`/`port` fields and the
+blast-radius rewrite stay read-only; models, auth, logs, status, and restart remain
+available. A failed gate is not retried automatically in the same session; restarting
+ai-manager after installing Target B starts a new check.
 
 ### 7.4 R-HOST-LOOPBACK and R-HOST-CLASS
 
