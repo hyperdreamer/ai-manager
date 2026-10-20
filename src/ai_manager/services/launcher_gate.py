@@ -33,20 +33,24 @@ TIMEOUT_S = 10.0
 
 
 def _parse_listener(stdout: str) -> tuple[str, int] | None:
-    """Return ``(host, port)`` from a two-line answer, or ``None`` if invalid.
+    """Return ``(host, port)`` from the launcher's closing two lines.
 
-    Exactly two non-empty lines are accepted: the host, then the port. Blank
-    lines around them are ignored, but the values themselves are used verbatim -
-    no whitespace is stripped, because a padded host would be written and
-    forwarded to uvicorn verbatim and produce an unusable endpoint. The host
-    must be exactly one of the three loopback spellings (``localhost`` compared
-    case-insensitively) and the port must be plain ASCII digits in ``1..65535``.
+    The launcher may print informational output before the answer - the real
+    chat2api launcher prints its version banner first - so the **last two**
+    non-empty lines are the answer, in order: the host, then the port. Any
+    earlier output is ignored rather than treated as a parse error; cross-target
+    acceptance against the real launcher is what established this.
+
+    The values are used verbatim: no whitespace is stripped, because a padded
+    host would be written and forwarded to uvicorn verbatim and produce an
+    unusable endpoint. The host must be exactly one of the three loopback
+    spellings (``localhost`` compared case-insensitively) and the port must be
+    plain ASCII digits in ``1..65535``.
     """
-    lines = stdout.splitlines()
-    values = [line for line in lines if line.strip()]
-    if len(values) != 2:
+    values = [line for line in stdout.splitlines() if line.strip()]
+    if len(values) < 2:
         return None
-    host, raw_port = values
+    host, raw_port = values[-2:]
     if host not in LOOPBACK_HOSTS and not (
         host.isascii() and host.lower() == "localhost"
     ):

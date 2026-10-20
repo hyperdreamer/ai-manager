@@ -60,3 +60,20 @@ Run the complete test suite:
 ```bash
 PYTHONPATH=src pytest tests/
 ```
+
+### Cross-target launcher acceptance
+
+The chat2api launcher must honor its configured host and port, and must advertise
+that capability with `start.sh --print-listener`. Two integration tests verify the
+gate in both directions against the real launcher:
+
+```bash
+PYTHONPATH=src pytest tests/test_launcher_gate_integration.py
+```
+
+- the **fixed** launcher passes the gate and reports the configured listener,
+- the **pre-fix** baseline launcher (`c40e3c6:start.sh`) fails closed.
+
+Neither case binds a socket. The target checkout is selected by
+`CHAT2API_LAUNCHER_CHECKOUT`; when that checkout is absent both tests skip, so the
+suite stays green without Target B installed.
