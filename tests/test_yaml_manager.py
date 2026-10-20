@@ -1,8 +1,19 @@
+import hashlib
+import os
 import shutil
+import stat
 from pathlib import Path
 import pytest
+from ai_manager.config import yaml_manager
+from ai_manager.config.app_registry import get_managed_apps
+from ai_manager.config.config_errors import ConfigError, StaleDocumentError
+from ai_manager.config.yaml_manager import (
+    _get_yaml_engine,
+    read_app_config,
+    render_app_config,
+    write_app_config,
+)
 from ai_manager.config.models import AppAIConfig, AppMetadata
-from ai_manager.config.yaml_manager import read_app_config, write_app_config
 
 
 @pytest.fixture
@@ -111,3 +122,75 @@ def test_textkit_split_model_transitions(temp_workspace):
     read_unified = read_app_config(meta_textkit)
     assert read_unified.is_split_model is False
     assert read_unified.model == "claude-3-5-sonnet"
+
+
+def test_render_is_pure_and_shares_the_writer_rendering_step(five_app_workspace, monkeypatch):
+    meta = get_managed_apps(five_app_workspace)["textkit"]
+    path = meta.relative_path / "config.yaml"
+    original = path.read_bytes()
+    before_listing = sorted(p.name for p in meta.relative_path.iterdir())
+    doc = _get_yaml_engine().load(original.decode())
+    calls = []
+    real_render = yaml_manager._render_document
+
+    def spy(tree):
+        calls.append(tree)
+        return real_render(tree)
+
+    render_app_config(meta, doc, lambda tree: tree["ai"].__setitem__("api_base", "http://127.0.0.1:8123"))
+    assert sorted(p.name for p in meta.relative_path.iterdir()) == before_listing
+    assert not list(meta.relative_path.glob("*.bak"))
+    assert not list(meta.relative_path.glob("*.tmp*"))
+
+    monkeypatch.setattr(yaml_manager, "_render_document", spy)
+    write_app_config(meta, read_app_config(meta))
+    assert len(calls) == 1
+
+
+def test_render_refuses_non_llm_metadata(five_app_workspace):
+    apps = get_managed_apps(five_app_workspace)
+    chat = apps["chat2api"]
+    with pytest.raises(ConfigError):
+        render_app_config(chat, {}, lambda tree: None)
+
+
+def test_checked_writer_preserves_mode_and_comments(five_app_workspace):
+    meta = get_managed_apps(five_app_workspace)["ai-grammar"]
+    path = meta.relative_path / "config.yaml"
+    original = path.read_bytes()
+    os.chmod(path, 0o640)
+    digest = hashlib.sha256(original).digest()
+    cfg = read_app_config(meta)
+    write_app_config(meta, cfg, digest)
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+    raw = path.read_bytes()
+    assert b"# bridge endpoint" in raw and b"# Keep debug and commented choices" in raw
+    assert not (path.parent / "config.yaml.bak").exists()
+
+
+def test_pure_renderer_and_checked_writer(five_app_workspace, monkeypatch):
+    meta = get_managed_apps(five_app_workspace)["ai-grammar"]
+    path = meta.relative_path / "config.yaml"
+    original = path.read_bytes()
+    doc = _get_yaml_engine().load(original.decode())
+    def update(tree):
+        tree["ai"]["api_base"] = "http://127.0.0.1:8123"
+    rendered = render_app_config(meta, doc, update)
+    assert rendered == original.replace(b":8000", b":8123")
+    assert path.read_bytes() == original and doc["ai"]["api_base"].endswith(":8000")
+    cfg = read_app_config(meta).model_copy(update={"model": "checked"})
+    digest = hashlib.sha256(original).digest()
+    path.write_bytes(original + b"# hand edit\n")
+    with pytest.raises(StaleDocumentError):
+        write_app_config(meta, cfg, digest)
+    assert path.read_bytes() == original + b"# hand edit\n"
+    path.unlink()
+    with pytest.raises(StaleDocumentError):
+        write_app_config(meta, cfg, digest)
+    assert not path.exists()
+    path.write_bytes(original)
+    assert write_app_config(meta, cfg, digest) is None
+    assert read_app_config(meta).model == "checked"
+    assert list(path.parent.glob("config.yaml.*.bak")) and not (path.parent / "config.yaml.bak").exists()
+    assert write_app_config(meta, cfg) is None
+    assert (path.parent / "config.yaml.bak").exists()

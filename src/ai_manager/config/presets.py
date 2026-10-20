@@ -13,7 +13,7 @@ DEFAULT_PRESETS: List[ProviderPreset] = [
         id="chat2api_local",
         name="Local chat2api Gateway (Port 8000)",
         api_base="http://127.0.0.1:8000",
-        default_key_env_var="CHAT2API_API_KEY",
+        default_key_env_var="CHAT2API_TOKEN",
         description="Local web API bridge for Gemini and Copilot",
     ),
     ProviderPreset(

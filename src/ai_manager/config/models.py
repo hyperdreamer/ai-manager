@@ -1,7 +1,7 @@
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional
-from pydantic import BaseModel, Field
+from typing import Dict, List, Literal, Optional
+from pydantic import BaseModel, Field, field_validator
 
 
 class ThemeMode(str, Enum):
@@ -33,6 +33,9 @@ class AppAIConfig(BaseModel):
         return self.model or "none"
 
 
+ConfigKind = Literal["llm", "chat2api", "file-bridge"]
+
+
 class AppMetadata(BaseModel):
     """Metadata describing a managed target application."""
     id: str
@@ -43,6 +46,18 @@ class AppMetadata(BaseModel):
     default_port: int
     supports_split_models: bool = False
     description: str = ""
+    config_kind: ConfigKind = "llm"
+
+    @field_validator("config_kind", mode="before")
+    @classmethod
+    def validate_config_kind(cls, value: object) -> object:
+        if type(value) is not str or value not in (
+            "llm", "chat2api", "file-bridge"
+        ):
+            raise ValueError(
+                f"Unknown config_kind {value!r}; expected llm, chat2api, or file-bridge."
+            )
+        return value
 
 
 class ProviderPreset(BaseModel):
@@ -76,6 +91,7 @@ class ModelFetchRequest(BaseModel):
     token: int
     api_base: str
     api_key: str
+    app_id: str = Field(strict=True, min_length=1)
 
 
 class ModelFetchResponse(BaseModel):

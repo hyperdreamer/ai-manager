@@ -1,5 +1,3 @@
-import shutil
-from pathlib import Path
 from unittest.mock import MagicMock
 
 from ai_manager.config.models import (
@@ -11,44 +9,17 @@ from ai_manager.config.models import (
 from ai_manager.ui.main_window import MainWindow
 
 
-def make_test_window(qtbot, tmp_path):
-    """Build a MainWindow against copied fixtures with mocked status sinks."""
-    fixtures_dir = Path(__file__).parent / "fixtures"
-    for d in ["ai-grammar", "textkit", "yt2txt"]:
-        (tmp_path / d / "backend").mkdir(parents=True)
-
-    shutil.copy2(
-        fixtures_dir / "ai_grammar_config.yaml",
-        tmp_path / "ai-grammar" / "backend" / "config.yaml",
-    )
-    shutil.copy2(
-        fixtures_dir / "textkit_unified_config.yaml",
-        tmp_path / "textkit" / "backend" / "config.yaml",
-    )
-    shutil.copy2(
-        fixtures_dir / "yt2txt_config.yaml",
-        tmp_path / "yt2txt" / "backend" / "config.yaml",
-    )
-
-    window = MainWindow(workspace_root=tmp_path)
+def make_test_window(qtbot, five_app_workspace):
+    window = MainWindow(workspace_root=five_app_workspace)
     qtbot.addWidget(window)
-
     window.sidebar.update_status = MagicMock()
     for view in window.views.values():
         view.update_service_status = MagicMock()
     return window
 
 
-def test_main_window_init_and_navigation(qtbot, tmp_path):
-    fixtures_dir = Path(__file__).parent / "fixtures"
-    for d in ["ai-grammar", "textkit", "yt2txt"]:
-        (tmp_path / d / "backend").mkdir(parents=True)
-
-    shutil.copy2(fixtures_dir / "ai_grammar_config.yaml", tmp_path / "ai-grammar" / "backend" / "config.yaml")
-    shutil.copy2(fixtures_dir / "textkit_unified_config.yaml", tmp_path / "textkit" / "backend" / "config.yaml")
-    shutil.copy2(fixtures_dir / "yt2txt_config.yaml", tmp_path / "yt2txt" / "backend" / "config.yaml")
-
-    window = MainWindow(workspace_root=tmp_path)
+def test_main_window_init_and_navigation(qtbot, five_app_workspace):
+    window = MainWindow(workspace_root=five_app_workspace)
     qtbot.addWidget(window)
 
     assert window.sidebar.current_app_id() == "ai-grammar"
@@ -72,8 +43,10 @@ def test_main_window_init_and_navigation(qtbot, tmp_path):
     assert window.settings.theme != prev_theme
 
 
-def test_status_normalization_forwards_reported_and_missing_apps(qtbot, tmp_path):
-    window = make_test_window(qtbot, tmp_path)
+def test_status_normalization_forwards_reported_and_missing_apps(
+    qtbot, five_app_workspace
+):
+    window = make_test_window(qtbot, five_app_workspace)
     reported = ServiceStatus(
         service_id="ai-grammar", state=ServiceRunState.RUNNING,
         pid=123, log_path="/tmp/grammar.log",
@@ -96,8 +69,10 @@ def test_status_normalization_forwards_reported_and_missing_apps(qtbot, tmp_path
             assert window.views[app_id].update_service_status.call_args.args[0] is forwarded
 
 
-def test_inactive_supervisor_sends_unknown_to_every_managed_app(qtbot, tmp_path):
-    window = make_test_window(qtbot, tmp_path)
+def test_inactive_supervisor_sends_unknown_to_every_managed_app(
+    qtbot, five_app_workspace
+):
+    window = make_test_window(qtbot, five_app_workspace)
     residual = ServiceStatus(
         service_id="ai-grammar", state=ServiceRunState.STOPPED,
         pid=None, log_path="/tmp/grammar.log",

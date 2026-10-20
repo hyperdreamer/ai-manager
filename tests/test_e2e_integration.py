@@ -1,27 +1,50 @@
-from pathlib import Path
+import json
+
 from ai_manager.config.app_registry import get_managed_apps
-from ai_manager.config.models import AppAIConfig
-from ai_manager.config.yaml_manager import read_app_config, write_app_config
-from ai_manager.services.supervisor import parse_supervisor_status
-from ai_manager.ui.main_window import MainWindow
-from ai_manager.utils.path_locator import find_ai_workspace_root
+from ai_manager.config.yaml_manager import _get_yaml_engine, read_app_config
 
 
-def test_full_workspace_integration(qtbot):
-    workspace = find_ai_workspace_root()
-    apps = get_managed_apps(workspace)
+def test_full_workspace_integration(five_app_workspace):
+    apps = get_managed_apps(five_app_workspace)
+    for meta in apps.values():
+        path = meta.relative_path / meta.config_file_name
+        if meta.config_kind == "llm":
+            cfg = read_app_config(meta)
+            assert cfg.api_base == "http://127.0.0.1:8000"
+            assert cfg.api_key == "$CHAT2API_TOKEN"
+        elif meta.config_kind == "chat2api":
+            doc = json.loads(path.read_bytes())
+            assert doc["server"]["auth_token_env"] is None
+            assert "options" not in doc["models"]["echo-1"]
+        elif meta.config_kind == "file-bridge":
+            doc = _get_yaml_engine().load(path.read_text())
+            assert doc["save_root"] == "../storage"
+            assert doc["port"] == 8964
+        else:
+            raise AssertionError(meta.config_kind)
 
-    assert "ai-grammar" in apps
-    assert "textkit" in apps
-    assert "yt2txt" in apps
 
-    # Verify real configurations can be read without crashing
-    for app_id, meta in apps.items():
-        cfg = read_app_config(meta)
-        assert cfg.api_base is not None
-        assert cfg.api_key is not None
+def test_five_widget_dispatch(qtbot, five_app_workspace):
+    from ai_manager.ui.app_detail_view import AppDetailView
+    from ai_manager.ui.main_window import MainWindow
+    from ai_manager.ui.structured_config_view import StructuredConfigView
 
-    # Verify MainWindow can instantiate against the live workspace
-    window = MainWindow(workspace_root=workspace)
+    window = MainWindow(workspace_root=five_app_workspace)
     qtbot.addWidget(window)
+    assert list(window.views) == [
+        "ai-grammar",
+        "textkit",
+        "yt2txt",
+        "chat2api",
+        "file-bridge",
+    ]
+    assert all(
+        isinstance(window.views[a], AppDetailView)
+        for a in ("ai-grammar", "textkit", "yt2txt")
+    )
+    assert all(
+        isinstance(window.views[a], StructuredConfigView)
+        for a in ("chat2api", "file-bridge")
+    )
     assert window.sidebar.current_app_id() == "ai-grammar"
+    assert not window.has_unsaved_changes()
