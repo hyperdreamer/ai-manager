@@ -33,6 +33,7 @@ class SystemTrayManager(QObject):
     hide_window_requested = pyqtSignal()
     toggle_window_requested = pyqtSignal()
     open_settings_requested = pyqtSignal()
+    about_requested = pyqtSignal()
     start_all_services_requested = pyqtSignal()
     stop_all_services_requested = pyqtSignal()
     quit_requested = pyqtSignal()
@@ -72,6 +73,9 @@ class SystemTrayManager(QObject):
 
         self._settings_action = self._context_menu.addAction("⚙ Settings...")
         self._settings_action.triggered.connect(self.open_settings_requested.emit)
+
+        self._about_action = self._context_menu.addAction("About ai-manager")
+        self._about_action.triggered.connect(self.about_requested.emit)
 
         self._context_menu.addSeparator()
 

@@ -27,12 +27,13 @@ def test_context_menu_order_and_structure(manager):
         "Stop All Supervised Services",
         "",
         "⚙ Settings...",
+        "About ai-manager",
         "",
         "Quit ai-manager",
     ]
-    assert actions[1].isSeparator()
-    assert actions[4].isSeparator()
-    assert actions[6].isSeparator()
+    assert [index for index, action in enumerate(actions)
+            if action.isSeparator()] == [1, 4, 7]
+    assert actions[6] is manager._about_action
 
 
 @pytest.mark.parametrize(
@@ -42,13 +43,18 @@ def test_context_menu_order_and_structure(manager):
         ("_start_all_action", "start_all_services_requested"),
         ("_stop_all_action", "stop_all_services_requested"),
         ("_settings_action", "open_settings_requested"),
+        ("_about_action", "about_requested"),
         ("_quit_action", "quit_requested"),
     ],
 )
 def test_menu_action_emits_expected_signal(qtbot, manager, attr, signal_name):
     action = getattr(manager, attr)
-    with qtbot.waitSignal(getattr(manager, signal_name), timeout=1000):
+    signal = getattr(manager, signal_name)
+    emissions = []
+    signal.connect(lambda *args: emissions.append(args))
+    with qtbot.waitSignal(signal, timeout=1000):
         action.trigger()
+    assert emissions == [()]
 
 
 def test_single_click_activation_emits_toggle(qtbot, manager):
@@ -62,11 +68,24 @@ def test_context_activation_does_not_toggle(qtbot, manager):
 
 
 def test_update_visibility_action_text(manager):
+    actions = manager._context_menu.actions()
+    snapshot = [action.text() for action in actions]
+
     manager.update_visibility_action_text(True)
     assert manager._toggle_action.text() == "Hide ai-manager"
+    current = manager._context_menu.actions()
+    assert current == actions
+    assert [action.text() for action in current] == [
+        "Hide ai-manager", *snapshot[1:]
+    ]
 
     manager.update_visibility_action_text(False)
     assert manager._toggle_action.text() == "Show ai-manager"
+    current = manager._context_menu.actions()
+    assert current == actions
+    assert [action.text() for action in current] == [
+        "Show ai-manager", *snapshot[1:]
+    ]
 
 
 def test_is_available_is_not_cached(mock_tray_available, manager):

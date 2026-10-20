@@ -1,11 +1,13 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
+from ai_manager import __version__
 from ai_manager.config.models import (
     ServiceRunState,
     ServiceStatus,
     SupervisorStatus,
     ThemeMode,
 )
+from ai_manager.ui import main_window as main_window_module
 from ai_manager.ui.main_window import MainWindow
 
 
@@ -89,3 +91,46 @@ def test_inactive_supervisor_sends_unknown_to_every_managed_app(
             service_id=app_id, state=ServiceRunState.UNKNOWN
         )
         assert window.views[app_id].update_service_status.call_args.args[0] == forwarded
+
+
+def test_main_window_title_includes_version(qtbot, tmp_path):
+    window = make_test_window(qtbot, tmp_path)
+    assert window.windowTitle() == (
+        f"ai-manager v{__version__} — AI Provider Configuration & Service Controller"
+    )
+    assert f"v{__version__}" in window.windowTitle()
+    assert "&" in window.windowTitle()
+
+
+def test_title_propagates_patched_source_version(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(main_window_module, "__version__", "9.8.7")
+    window = make_test_window(qtbot, tmp_path)
+    assert window.windowTitle() == (
+        "ai-manager v9.8.7 — AI Provider Configuration & Service Controller"
+    )
+
+
+def test_open_about_dialog_constructs_fresh_modal(qtbot, tmp_path, monkeypatch):
+    window = make_test_window(qtbot, tmp_path)
+    first, second = MagicMock(), MagicMock()
+    factory = MagicMock(side_effect=[first, second])
+    monkeypatch.setattr(main_window_module, "AboutDialog", factory)
+
+    window.open_about_dialog()
+    window.open_about_dialog()
+
+    assert factory.call_args_list == [call(window), call(window)]
+    first.exec.assert_called_once_with()
+    second.exec.assert_called_once_with()
+
+
+def test_tray_about_request_opens_about_dialog(qtbot, tmp_path, monkeypatch):
+    window = make_test_window(qtbot, tmp_path)
+    instance = MagicMock()
+    factory = MagicMock(return_value=instance)
+    monkeypatch.setattr(main_window_module, "AboutDialog", factory)
+
+    window.tray_manager._about_action.trigger()
+
+    factory.assert_called_once_with(window)
+    instance.exec.assert_called_once_with()

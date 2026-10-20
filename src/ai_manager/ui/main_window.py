@@ -19,6 +19,7 @@ from PyQt6.QtWidgets import (
     QToolButton,
     QWidget,
 )
+from ai_manager import __version__
 from ai_manager.config.app_registry import get_managed_apps
 from ai_manager.config.blast_radius import (
     auth_mismatch_warning,
@@ -56,6 +57,7 @@ from ai_manager.services.config_jobs import LauncherProbeJob, StructuredSaveJob
 from ai_manager.services.desktop_integration import DesktopIntegrationService
 from ai_manager.services.model_fetcher import ModelFetchWorker
 from ai_manager.services.supervisor import SupervisorManager
+from ai_manager.ui.about_dialog import AboutDialog
 from ai_manager.ui.app_detail_view import AppDetailView
 from ai_manager.ui.app_sidebar import AppSidebar
 from ai_manager.ui.config_dialogs import (
@@ -147,6 +149,7 @@ class MainWindow(QMainWindow):
             self.supervisor_manager.stop_supervisor
         )
         self.tray_manager.open_settings_requested.connect(self.open_settings_dialog)
+        self.tray_manager.about_requested.connect(self.open_about_dialog)
         self.tray_manager.quit_requested.connect(self.handle_quit)
         if self.tray_manager.is_available():
             self.tray_manager.show()
@@ -175,7 +178,9 @@ class MainWindow(QMainWindow):
         self.supervisor_manager.start_if_not_running()
 
     def _init_ui(self) -> None:
-        self.setWindowTitle("ai-manager — AI Provider Configuration & Service Controller")
+        self.setWindowTitle(
+            f"ai-manager v{__version__} — AI Provider Configuration & Service Controller"
+        )
         self.resize(1000, 680)
 
         # Toolbar
@@ -794,6 +799,11 @@ class MainWindow(QMainWindow):
         """Open the modal application settings dialog."""
         dialog = SettingsDialog(self.settings, self.desktop_service, parent=self)
         dialog.settings_saved.connect(self._on_settings_saved)
+        dialog.exec()
+
+    def open_about_dialog(self) -> None:
+        """Open a fresh modal About dialog owned by this window."""
+        dialog = AboutDialog(self)
         dialog.exec()
 
     def _on_settings_saved(self, new_settings: UserSettings) -> None:
