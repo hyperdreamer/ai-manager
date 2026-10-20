@@ -19,8 +19,8 @@
 
 ## Global Constraints
 
-- Single-literal version rule: the sole authored application-version source is the unchanged module-level `__version__ = "0.1.3"` in `src/ai_manager/__init__.py`, represented by one `ast.Assign` with a string `ast.Constant`; documentation, injected test data, and derived metadata are not independent sources.
-- Release-triplet scheme: the current application version matches exactly `^\d+\.\d+\.\d+$`; retain `0.1.3`, import the symbol in current-version assertions, and render supplied values unchanged, including injected pre-release test data.
+- Single-literal version rule: the sole authored application-version source is the unchanged module-level `__version__ = "0.1.4"` in `src/ai_manager/__init__.py`, represented by one `ast.Assign` with a string `ast.Constant`; documentation, injected test data, and derived metadata are not independent sources.
+- Release-triplet scheme: the current application version matches exactly `^\d+\.\d+\.\d+$`; retain the current `0.1.4`, import the symbol in current-version assertions, and render supplied values unchanged, including injected pre-release test data.
 - Add no new runtime or dev dependencies; preserve the existing build backend, dependency declarations, optional dependencies, script, and package data.
 - Use PyQt6 + pytest-qt only for new GUI behavior and Qt tests, together with pytest and the Python standard library; reuse the existing headless fixtures in `tests/conftest.py` unchanged.
 - The exact full-suite command, from the implementation worktree root, is `AI_WORKSPACE_ROOT=/data/home/guest/Development/ai PYTHONPATH=src pytest tests/`; require exit status 0 and no failures.
@@ -31,7 +31,7 @@
 - Leave `src/ai_manager/__init__.py`, `src/ai_manager/ui/icons.py`, `src/ai_manager/ui/mnemonic.py`, `tests/test_mnemonic.py`, and `tests/conftest.py` unchanged; add no service, persisted state, settings key, asset, telemetry, update checking, license/credits pane, or tray-tooltip version.
 - Both About entry points create a fresh dialog on every invocation and call its `exec()` once; factory mocks prove constructor calls, while tests patching only the real class's `exec` prove ownership and side-effect freedom.
 - The approved contracts are `docs/superpowers/specs/2026-10-20-app-version-display-spec.md` and `docs/superpowers/specs/2026-10-20-app-version-display-design.md`; the specification's resolved Settings footer supersedes ActionRole placement.
-- Line ranges below refer to baseline `4cd30cd`; locate the named enclosing member if preceding tasks shift lines, without broad refactoring.
+- Line ranges below were authored against `4cd30cd`; the branch was re-baselined onto `e02edae` (`cf3c63b`), so locate the named enclosing member instead of trusting a line number, without broad refactoring.
 - Task 4 contains the plan's single non-pytest verification: the exact wheel build and exact-wheel METADATA inspection together, after the full pytest suite passes; commit commands are task handoffs, not additional verification gates.
 
 ## Task 1: Build and test the leaf About dialog
@@ -873,7 +873,7 @@ git commit -m "feat(settings): open About from a separate footer button"
 
 **Interfaces:**
 
-- Consumes existing `ai_manager.__version__: str`, the unchanged literal `__version__ = "0.1.3"`; setuptools statically reads the same symbol through `version = {attr = "ai_manager.__version__"}`.
+- Consumes existing `ai_manager.__version__: str`, the unchanged literal `__version__ = "0.1.4"`; setuptools statically reads the same symbol through `version = {attr = "ai_manager.__version__"}`.
 - Consumes Task 1's `AboutDialog.__init__(self, parent: Optional[QWidget] = None, version: Optional[str] = None) -> None`, whose module imports `__version__`, and Task 2's `MainWindow.open_about_dialog(self) -> None`, whose module imports the same symbol for the title; both consumer modules must lack version literals and forbidden runtime imports.
 - Consumes Task 2's `SystemTrayManager.about_requested = pyqtSignal()` with no arguments and Task 3's `SettingsDialog._build_footer(self) -> QHBoxLayout` and `_open_about_dialog(self) -> None` only through the final full-suite regression gate; no UI files are modified in this task.
 - Produces PEP 621 `project.dynamic == ["version"]` with no `project.version`, `tool.setuptools.dynamic.version == {"attr": "ai_manager.__version__"}`, and `project.authors == [{"name": "Henry", "email": "wenhepku@gmail.com"}]`.
@@ -1086,7 +1086,7 @@ Run from the implementation worktree root:
 AI_WORKSPACE_ROOT=/data/home/guest/Development/ai PYTHONPATH=src pytest tests/
 ```
 
-Expected: exit status 0 with no failing tests, including every new/updated case and all unchanged tests. The recorded 216-test baseline is historical, not an expected final count. Do not proceed to wheel verification on a failing suite.
+Expected: exit status 0 with no failing tests, including every new/updated case and all unchanged tests. The recorded 649-test baseline at `e02edae` is historical, not an expected final count. Do not proceed to wheel verification on a failing suite.
 
 - [ ] **Step 8: Perform the sole non-pytest verification, build and inspect the exact wheel (2–5 minutes)**
 
@@ -1118,7 +1118,7 @@ print(f"Verified {wheel.name}: Version: {__version__}")
 PY
 ```
 
-For the unchanged release the exact produced wheel is `dist/ai_manager-0.1.3-py3-none-any.whl`. Both commands together are the single wheel verification required by specification §10.3.
+For the unchanged release the exact produced wheel is `dist/ai_manager-0.1.4-py3-none-any.whl`. Both commands together are the single wheel verification required by specification §10.3.
 
 - [ ] **Step 9: Commit (2–5 minutes)**
 

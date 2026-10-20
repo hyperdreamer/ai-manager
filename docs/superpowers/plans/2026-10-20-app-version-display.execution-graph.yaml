@@ -2,7 +2,7 @@
 # Generated from the plan and the lane/interface map; never hand-edited.
 source_plan:
   path: docs/superpowers/plans/2026-10-20-app-version-display.md
-  sha256: c74533424e084258bf0e60d1668cb022f9744d191bba5e74ff35fa8d061decaa
+  sha256: a04085f3557f9d9e6b20bc1ef0db96b79010e6328f2a889324810c9c162ef936
 lanes:
   - id: lane-about
     task_ids: [T-001]

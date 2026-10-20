@@ -30,7 +30,7 @@ value; UI consumers obtain it through a Python import.
 - License, credits, and third-party-version panes in About.
 - Update checking, telemetry, and a new-version banner.
 - A version in the tray tooltip.
-- Changing the current version value, `0.1.3`.
+- Changing the current version value, `0.1.4`.
 
 ### 1.3 File responsibilities
 
@@ -59,7 +59,7 @@ The complete current table in `pyproject.toml` is:
 ```toml
 [project]
 name = "ai-manager"
-version = "0.1.3"
+version = "0.1.4"
 description = "Desktop administration GUI for local AI backends"
 authors = [{ name = "Henry", email = "henry@local" }]
 dependencies = [
@@ -114,7 +114,7 @@ The source of truth remains the existing assignment in
 `src/ai_manager/__init__.py`:
 
 ```python
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 ```
 
 Consumers in `main_window.py` and `about_dialog.py` use this import path:
@@ -132,7 +132,7 @@ from ai_manager import __version__
 | Other occurrences | UI text and packaging configuration derive from that symbol. Documentation examples and injected test data do not establish another application-version source; tests asserting the current version import the symbol. |
 | Import behaviour | The version read performs no IO, distribution-metadata lookup, subprocess call, exception handling, or fallback. A source checkout does not need an installed distribution to render its version. |
 | Propagation | Assigning a different value to the consumer module's imported `__version__` changes the rendered surface: the window title and the About version label both follow it. `AboutDialog` therefore resolves its default inside `__init__` (§4.1), never in a frozen default-argument binding. |
-| Current release scheme | The version matches `^\d+\.\d+\.\d+$` exactly. This change retains `0.1.3`. |
+| Current release scheme | The version matches `^\d+\.\d+\.\d+$` exactly. This change retains the current value, `0.1.4`. |
 | Rendering | Title and About interpolate the supplied version unchanged. UI code does not validate, normalize, prefix with a git identifier, or truncate that value. |
 | Future release bump | Edit only the literal in `src/ai_manager/__init__.py`; packaging and default UI text derive from it. |
 | Editable installation | After a version bump, rerun the editable installation before expecting `pip show ai-manager` to reflect the new value. Record this consequence in the release note. |
@@ -455,7 +455,7 @@ The README requirement is a pytest case
 
 ### 10.1 Mechanical checklist
 
-- [ ] `src/ai_manager/__init__.py` remains the sole authored application-version source, `__version__ = "0.1.3"`; the literal is an `ast.Constant` string; the module imports nothing; `main_window.py` and `about_dialog.py` import the symbol and contain no version literal and no metadata/subprocess/platform imports.
+- [ ] `src/ai_manager/__init__.py` remains the sole authored application-version source, `__version__ = "0.1.4"`; the literal is an `ast.Constant` string; the module imports nothing; `main_window.py` and `about_dialog.py` import the symbol and contain no version literal and no metadata/subprocess/platform imports.
 - [ ] Changing the consumer module's `__version__` changes both rendered surfaces (title and About label); no frozen default-argument binding exists.
 - [ ] Parsed `pyproject.toml` matches §2, has no static project version, derives the version through `ai_manager.__version__`, and preserves every unchanged declaration listed in the `test_pyproject_derives_version` row.
 - [ ] The author name/email are exactly `Henry` / `wenhepku@gmail.com`.
@@ -483,8 +483,7 @@ AI_WORKSPACE_ROOT=/data/home/guest/Development/ai PYTHONPATH=src pytest tests/
 
 Require exit status `0` and no failing tests. The pinned `AI_WORKSPACE_ROOT`
 prevents the worktree cwd from changing the e2e workspace selection. The design
-records 216 passing baseline tests at `3b1e5b1`; new tests increase the total, so
-216 is historical evidence rather than a required final count.
+records 649 passing baseline tests at `e02edae`; the delivery branch was re-baselined from `3b1e5b1` to `e02edae` (`0.1.4`) after that release landed, so new tests increase the total and both figures are historical evidence rather than a required final count.
 
 ### 10.3 Wheel metadata verification
 
@@ -495,7 +494,7 @@ python -m pip wheel --no-deps --no-build-isolation -w dist .
 ```
 
 Require exit status `0`. For this unchanged release the produced wheel is
-`dist/ai_manager-0.1.3-py3-none-any.whl`. Inspect that exact wheel, rather than an
+`dist/ai_manager-0.1.4-py3-none-any.whl`. Inspect that exact wheel, rather than an
 arbitrary older archive from `dist`, with the following verification command:
 
 ```bash

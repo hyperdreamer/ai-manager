@@ -1,5 +1,11 @@
 # Design Document: App Version Display
 
+> **Re-baseline note.** After approval, `main` advanced to `e02edae`
+> (`chore(release): 0.1.4`, carrying the chat2api/file-bridge delivery). The run was
+> re-baselined onto that commit, so the remaining `0.1.3` references in this document
+> are historical descriptions of the originally pinned base and of the recorded
+> mockup, not current values.
+
 ## 1. Background & Goals
 
 `ai-manager` is a PyQt6 desktop GUI for administering local AI backends. The
@@ -42,7 +48,7 @@ the primary launch path.
 - No license, credits, or third-party-version pane in the About dialog.
 - No update checking, telemetry, or "new version available" banner.
 - No version in the tray tooltip (rejected in design review of the option set).
-- No change to the `0.1.3` value itself; this is a display and single-source change.
+- No change to the `0.1.4` value itself; this is a display and single-source change.
 
 ## 2. Chosen Option (Mockup Decision)
 
@@ -83,7 +89,7 @@ The change is deliberately shallow: one new leaf module, three small edits, and 
 packaging config change. There is no new service, state, or persistence.
 
 ```text
-src/ai_manager/__init__.py          __version__ = "0.1.3"     <-- only authored literal
+src/ai_manager/__init__.py          __version__ = "0.1.4"     <-- only authored literal
         ^                     ^
         | import              | setuptools attr: (build time)
         |                     |
@@ -96,7 +102,7 @@ src/ai_manager/ui/     pyproject.toml
 
 ### 3.1 Version source of truth
 
-`src/ai_manager/__init__.py` keeps `__version__ = "0.1.3"` and becomes the single
+`src/ai_manager/__init__.py` keeps `__version__ = "0.1.4"` and becomes the single
 authored source. `pyproject.toml` stops declaring a static version:
 
 ```toml
@@ -112,7 +118,7 @@ version = {attr = "ai_manager.__version__"}
 module-level string literal in a package with no import-time side effects; the
 `src/` layout is already auto-discovered by setuptools. This was verified by
 building a wheel from a throwaway copy: it produced
-`ai_manager-0.1.3-py3-none-any.whl` with `Version: 0.1.3` in `METADATA`.
+`ai_manager-0.1.4-py3-none-any.whl` with `Version: 0.1.4` in `METADATA`.
 
 Consequence to document, not fix: after raising the version, an editable install
 must be re-run before `pip show ai-manager` reflects it. That is inherent to
@@ -193,7 +199,7 @@ provenance block we deferred. A ~40-line module is the smaller long-term cost.
 `pyproject.toml` contains `authors = [{ name = "Henry", email = "henry@local" }]`.
 Modern setuptools validates `project.authors[].email` as `idn-email`; a single-label
 domain fails, so `pip install -e .` — an install path the README documents — is
-already broken at `3b1e5b1` under setuptools 81 and 84. Because this change edits
+still broken on `e02edae` under setuptools 81 and 84. Because this change edits
 that same `[project]` table and can only be build-verified through it, the design
 includes correcting the address to `wenhepku@gmail.com` (the address on this
 repository's own commits).
@@ -232,8 +238,7 @@ AI_WORKSPACE_ROOT=/data/home/guest/Development/ai PYTHONPATH=src pytest tests/
 python -m pip wheel --no-deps --no-build-isolation -w dist .   # then read METADATA
 ```
 
-Recorded baselines at `3b1e5b1`: 216 passed in the base checkout, and 216 passed in
-an external worktree with `AI_WORKSPACE_ROOT` pinned. The suite must not regress.
+Recorded baseline at the re-baselined tip `e02edae`: 649 tests collected. The pre-rebaseline `3b1e5b1` baseline was 216 passed. The suite must not regress.
 
 ## 6. Risks
 
