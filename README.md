@@ -11,6 +11,7 @@ Desktop administration GUI built with **PyQt6** for managing AI provider configu
 - 🚀 **`ai-backends` Supervisor Control**: Seamless integration with the supervisor daemon to check status and trigger one-click restarts (`ai-backends restart <app>`).
 - 🌓 **Light and Dark Themes**: Switch themes dynamically at runtime with settings persisted to `~/.config/ai-manager/settings.json`.
 - 💾 **Dirty State Protection**: Tracks in-memory unsaved drafts per application, shows asterisk (`*`) indicators on sidebar tabs, and prompts before discarding changes on window close.
+- **Version Display**: The version appears in the window title and in the About dialog (tray menu or Settings).
 
 ## Applications Managed
 
@@ -52,6 +53,8 @@ Or install in your virtual environment:
 pip install -e .
 ai-manager
 ```
+
+Bump the version only in `src/ai_manager/__init__.py`; packaging metadata derives from it. Re-run the editable install after a bump.
 
 ## Running Tests
 
