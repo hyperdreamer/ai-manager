@@ -564,3 +564,44 @@ def test_string_provider_still_loads(tmp_path):
     )
 
     assert load("chat2api", path).existed is True
+
+
+def test_deeply_nested_configuration_is_a_load_error(tmp_path):
+    """Depth must be rejected at the boundary, not crash during a later copy.
+
+    The loader deep-copies a document several times. 500 nested arrays parse fine
+    but raise RecursionError inside those copies - not a ConfigLoadError - which
+    escaped the load-error handler and aborted MainWindow construction.
+    """
+    from ai_manager.config.config_errors import ConfigShapeError
+    from ai_manager.config.structured_config import MAX_CONFIG_DEPTH, load
+
+    document = {
+        "server": {"port": 8123},
+        "models": {"m": {"provider": "echo", "options": {"future": []}}},
+    }
+    cursor = document["models"]["m"]["options"]["future"]
+    for _ in range(MAX_CONFIG_DEPTH + 10):
+        cursor.append([])
+        cursor = cursor[0]
+
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ConfigShapeError) as excinfo:
+        load("chat2api", path)
+
+    assert "nested more than" in str(excinfo.value)
+
+
+def test_normal_nesting_still_loads(tmp_path):
+    from ai_manager.config.structured_config import load
+
+    document = {
+        "server": {"port": 8123},
+        "models": {"m": {"provider": "echo", "options": {"future": [[[1]]]}}},
+    }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    assert load("chat2api", path).existed is True

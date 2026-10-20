@@ -556,9 +556,32 @@ def test_capability_failure_never_surfaces_credentials(tmp_path):
     cleaned = redact_diagnostics(raw)
 
     assert sentinel not in cleaned
-    # The classification and field information must survive for diagnosis.
+    # Classification survives so the user can still act on the error. Everything
+    # from ``input_value=`` onward is discarded: the dumped value is
+    # unbalanced-brace-hostile, so no pattern can delimit it safely.
     assert "Field required" in cleaned
-    assert "input_type=dict" in cleaned
+    assert "input_value=***" in cleaned
+    assert "input_type" not in cleaned
+
+
+def test_redaction_survives_a_brace_inside_the_credential():
+    """A credential containing ``}`` must not defeat the truncation.
+
+    A pattern-based redaction ended the dumped mapping at the first ``}``, so a
+    password such as ``},input_type=Z9`` survived into the details panel.
+    """
+    from ai_manager.services.launcher_gate import redact_diagnostics
+
+    evil = (
+        "Field required [type=missing, "
+        "input_value={'options': {'password': '},input_type=Z9'}}, input_type=dict]"
+    )
+
+    cleaned = redact_diagnostics(evil)
+
+    assert "Z9" not in cleaned
+    assert "password" not in cleaned
+    assert "Field required" in cleaned
 
 
 def test_redaction_covers_each_secret_option_key():
@@ -590,3 +613,19 @@ def test_probe_result_detail_is_redacted(tmp_path):
     assert sentinel not in result.detail
     assert sentinel not in result.stderr
     assert sentinel not in result.stdout
+
+
+def test_service_validator_diagnostics_are_redacted():
+    """The same policy must hold at every diagnostic boundary, not just the gate."""
+    from ai_manager.services.service_validation import (
+        ServiceValidationError,
+        redact_diagnostics,
+    )
+
+    sentinel = "SENTINEL_W09"
+    raw = f"input_value={{'options': {{'account': '{sentinel}'}}}}, input_type=dict]"
+
+    assert sentinel not in redact_diagnostics(raw)
+    # The exception carries the redacted text, so the details panel cannot show it.
+    error = ServiceValidationError(1, "", raw)
+    assert sentinel not in (error.stderr or "")

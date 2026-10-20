@@ -19,6 +19,7 @@ from ai_manager.config.config_errors import (
     ServiceValidationTimeout,
     UnknownConfigKindError,
 )
+from ai_manager.services.launcher_gate import redact_diagnostics
 from ai_manager.config.structured_models import StructuredKind, ValidationResult
 from ai_manager.services.app_interpreter import (
     resolve_app_interpreter,
@@ -109,11 +110,21 @@ def validate_candidate(
         except subprocess.TimeoutExpired as exc:
             child.kill()
             stdout, stderr = child.communicate()
-            raise ServiceValidationTimeout(stdout, stderr) from exc
+            raise ServiceValidationTimeout(
+                redact_diagnostics(stdout), redact_diagnostics(stderr)
+            ) from exc
         if child.returncode == IMPORT_UNAVAILABLE_EXIT:
-            return ValidationResult("manager-only", DEGRADED_NOTICE, stdout + stderr)
+            return ValidationResult(
+                "manager-only",
+                DEGRADED_NOTICE,
+                redact_diagnostics(stdout + stderr),
+            )
         if child.returncode != 0:
-            raise ServiceValidationError(child.returncode, stdout, stderr)
+            raise ServiceValidationError(
+                child.returncode,
+                redact_diagnostics(stdout),
+                redact_diagnostics(stderr),
+            )
         return ValidationResult(
             "service", f"configuration valid — validated by {kind} · ai-manager"
         )

@@ -59,15 +59,21 @@ class ServiceValidationError(ConfigError):
     def __init__(self, returncode: int, stdout: str, stderr: str) -> None:
         super().__init__("Service validator rejected the configuration; nothing was saved.")
         self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
+        # Redact in the type, not at the call site: a diagnostic that carries a
+        # credential must be safe no matter who constructs or displays it.
+        from ai_manager.services.launcher_gate import redact_diagnostics
+
+        self.stdout = redact_diagnostics(stdout)
+        self.stderr = redact_diagnostics(stderr)
 
 
 class ServiceValidationTimeout(ConfigError):
     def __init__(self, stdout: str = "", stderr: str = "") -> None:
         super().__init__("Service validator timed out after 10 seconds; nothing was saved.")
-        self.stdout = stdout
-        self.stderr = stderr
+        from ai_manager.services.launcher_gate import redact_diagnostics
+
+        self.stdout = redact_diagnostics(stdout)
+        self.stderr = redact_diagnostics(stderr)
 
 
 class InterpreterUnavailableError(ConfigError):

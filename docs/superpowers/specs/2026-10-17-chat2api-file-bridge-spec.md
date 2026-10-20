@@ -1151,7 +1151,11 @@ Target B's `start.sh` accepts `--print-listener`. When present, it:
 2. prints the resolved host and port on separate lines to **stdout**;
 3. exits `0` **before** any uvicorn import, bind, or serve.
 
-It never reads or prints secrets, never binds a socket, and never starts a process tree.
+It **reads the installed configuration** — and, through the service loader, its
+`.env` — exactly as a real start would; that is what makes the answer truthful. It
+never *prints* secrets, binds no socket, and starts no server. Failure diagnostics are
+redacted (`redact_diagnostics`) before they are stored or displayed, because the
+service's pydantic errors can quote option values verbatim.
 A launcher predating this flag exits non-zero on the unknown argument, which the gate
 treats as "capability absent".
 
@@ -2301,7 +2305,7 @@ No C source/test changes or C dependency installation is part of delivery. An op
 ## 13. Migration and operational limits
 
 1. Existing three LLM config formats, examples, normalized equality, model transitions and two-argument writer semantics remain compatible. The new metadata default means old metadata construction sites continue to represent llm. Requests constructed by internal callers/tests now must supply app_id. There is no settings schema migration.
-2. First run lists all five apps. Existing structured files are read without creation or normalization writes. A missing new-kind file shows empty sections and Create from Example; it remains absent until explicit save passes validation. Existing LLM missing-file example copy remains unchanged. Launcher probe runs once per session using synthetic echo/null config and is always cleaned up.
+2. First run lists all five apps. Existing structured files are read without creation or normalization writes. A missing new-kind file shows empty sections and Create from Example; it remains absent until explicit save passes validation. Existing LLM missing-file example copy remains unchanged. Launcher capability check runs once per session by invoking `start.sh --print-listener` against the installed configuration (synthetic echo/null configs belong to the acceptance tests in B, not to this runtime check); it binds nothing and its diagnostics are redacted.
 3. First successful structured save normalizes JSON to indent 2 plus LF, or uses the YAML round-trip engine. Untouched parsed values/order survive; byte formatting across a JSON file need not. Complete original bytes remain in timestamped exclusive backups. Existing mode bits are retained; a new file uses 0600.
 4. `chat2api_local` now selects `$CHAT2API_TOKEN`. Existing saved `$CHAT2API_API_KEY` values are not silently migrated. A differing named auth variable gets the mismatch warning; the user chooses any credential/key change.
 5. If B is never updated, the behavioral gate fails and chat2api host/port plus D7 rewrite stay read-only. Models/options/auth remain editable and validated; logs/status/restart remain available. There is no version-string or manual override bypass. A cannot be declared delivered independently of B under the approved two-target gate.

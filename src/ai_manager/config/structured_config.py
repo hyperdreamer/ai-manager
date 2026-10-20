@@ -97,6 +97,7 @@ def _shape(kind: StructuredKind, path: Path, tree) -> None:
         return
     if not isinstance(tree["models"], dict):
         raise ConfigShapeError(path, "Models must be a mapping; save is disabled.")
+    _check_depth(path, tree)
     for name, route in tree["models"].items():
         if not isinstance(route, dict):
             raise ConfigShapeError(path, f"Model {name!r} must be a mapping; save is disabled.")
@@ -111,6 +112,35 @@ def _shape(kind: StructuredKind, path: Path, tree) -> None:
                 path,
                 f"Provider for model {name!r} must be a string; save is disabled.",
             )
+
+
+#: Maximum container nesting accepted from a configuration file.
+#:
+#: The editor deep-copies a parsed document several times (baseline capture, draft
+#: derivation, transaction staging). A pathologically nested file - trivially
+#: expressible in JSON - parses fine but raises ``RecursionError`` inside those
+#: copies, which is not a ``ConfigLoadError`` and therefore escaped the load-error
+#: handler and aborted ``MainWindow`` construction. Detect it at the boundary.
+MAX_CONFIG_DEPTH = 32
+
+
+def _check_depth(path: Path, tree: object) -> None:
+    """Reject documents nested deeper than ``MAX_CONFIG_DEPTH``."""
+    stack: list[tuple[object, int]] = [(tree, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > MAX_CONFIG_DEPTH:
+            raise ConfigShapeError(
+                path,
+                f"Configuration is nested more than {MAX_CONFIG_DEPTH} levels deep; "
+                "save is disabled.",
+            )
+        if isinstance(node, dict):
+            for value in node.values():
+                stack.append((value, depth + 1))
+        elif isinstance(node, list):
+            for value in node:
+                stack.append((value, depth + 1))
 
 
 def _parse_bytes(kind: StructuredKind, path: Path, raw: bytes):

@@ -45,12 +45,23 @@ _SECRET_KEYS = (
 )
 _REDACTED = "***"
 
-#: An ``input_value={...}`` blob is how pydantic embeds the offending data.
-_INPUT_VALUE = re.compile(r"input_value=(\{.*?\}|\[.*?\]),?\s*input_type=", re.DOTALL)
+#: Marker written in place of redacted content.
+_REDACTED = "***"
+
+#: From ``input_value=`` onward, pydantic dumps the offending configuration. That
+#: dump is unbalanced-brace-hostile: a credential may itself contain ``}``,
+#: ``input_type=`` or quotes, so no pattern can find its end reliably. Everything
+#: from the marker to the end of that line is therefore discarded wholesale. The
+#: error class, location and message come earlier on the line and survive.
+_INPUT_VALUE_MARKER = "input_value="
+
+#: A secret key followed by ``: "value"`` in non-pydantic output. Escaped quotes are
+#: handled by refusing to cross a line boundary; the truncation above is the primary
+#: defence for structured dumps, this covers plain-text diagnostics.
 _SECRET_PAIR = re.compile(
-    r"(?P<key>['\"]?(?:" + "|".join(_SECRET_KEYS) + r")['\"]?\s*:\s*)"
-    r"(?P<quote>['\"])(?P<value>.*?)(?P=quote)",
-    re.IGNORECASE | re.DOTALL,
+    r"(?P<key>['\"]?(?:" + "|".join(_SECRET_KEYS) + r")['\"]?\s*[:=]\s*)"
+    r"(?P<quote>['\"])(?P<value>[^\n]*?)(?P=quote)",
+    re.IGNORECASE,
 )
 
 
@@ -58,16 +69,29 @@ def redact_diagnostics(text: str) -> str:
     """Strip credential-bearing values from service diagnostics.
 
     The launcher runs the service's real configuration loader, so a validation
-    error can quote the offending configuration verbatim - including a password
-    or token held in an option value. Those diagnostics reach a details panel
-    that expands automatically, which would bypass the editor's Reveal controls.
-    Redact before the text is stored or displayed.
+    error can quote the offending configuration verbatim - including a password or
+    token held in an option value. Those diagnostics reach a details panel that
+    expands automatically, which would bypass the editor's Reveal controls.
+
+    Truncating at ``input_value=`` is deliberate. An earlier pattern-based version
+    tried to match the end of the dumped mapping; a credential containing ``}``
+    defeated it and survived into the UI. Discarding the remainder of the line
+    cannot be defeated by the credential's *contents*, which is the property that
+    matters.
     """
     if not text:
         return text
-    redacted = _INPUT_VALUE.sub("input_value=***, input_type=", text)
-    redacted = _SECRET_PAIR.sub(lambda m: f"{m.group('key')}{m.group('quote')}{_REDACTED}{m.group('quote')}", redacted)
-    return redacted
+    lines = []
+    for line in text.splitlines():
+        marker = line.find(_INPUT_VALUE_MARKER)
+        if marker != -1:
+            line = f"{line[:marker]}{_INPUT_VALUE_MARKER}{_REDACTED}"
+        lines.append(_SECRET_PAIR.sub(
+            lambda m: f"{m.group('key')}{m.group('quote')}{_REDACTED}{m.group('quote')}",
+            line,
+        ))
+    redacted = "\n".join(lines)
+    return redacted + ("\n" if text.endswith("\n") else "")
 
 
 def _parse_listener(stdout: str) -> tuple[str, int] | None:

@@ -287,9 +287,40 @@ class MainWindow(QMainWindow):
                 return
         else:
             raise UnknownConfigKindError(meta.config_kind)
-        self._saved_configs[app_id] = copy.deepcopy(config)
-        self._draft_configs[app_id] = copy.deepcopy(config)
-        view.load_config(config)
+        # Everything below derives state from the parsed document. A pathological
+        # document can pass shape checks yet still defeat a deep copy or a widget
+        # (deep nesting raising RecursionError, for example). Such a failure must
+        # leave this app in its disabled load-error state rather than escape, because
+        # this runs during MainWindow construction and one bad file must not stop the
+        # manager from opening.
+        try:
+            saved = copy.deepcopy(config)
+            draft = copy.deepcopy(config)
+        except RecursionError:
+            if meta.config_kind in ("chat2api", "file-bridge"):
+                view.show_load_error(
+                    "Configuration is nested too deeply to edit; save is disabled.",
+                    "load-error",
+                )
+                self.sidebar.update_configured_port(app_id, None)
+                self._saved_configs.pop(app_id, None)
+                self._draft_configs.pop(app_id, None)
+                self._set_dirty_indicator(app_id)
+                return
+            raise
+        self._saved_configs[app_id] = saved
+        self._draft_configs[app_id] = draft
+        try:
+            view.load_config(config)
+        except Exception as exc:  # widget rejection must not abort startup
+            if meta.config_kind in ("chat2api", "file-bridge"):
+                view.show_load_error(
+                    f"Configuration could not be displayed: {exc}", "load-error"
+                )
+                self.sidebar.update_configured_port(app_id, None)
+                self._set_dirty_indicator(app_id)
+                return
+            raise
         self._update_configured_port(app_id, config)
         self._set_dirty_indicator(app_id)
 
