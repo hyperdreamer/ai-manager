@@ -26,9 +26,8 @@ def window(qtbot, five_app_workspace, monkeypatch):
 
 
 def _dirty_draft(window: MainWindow) -> None:
-    """Make both an LLM and a structured app dirty in one call."""
+    """Make the LLM (ai-grammar) draft dirty, and only that draft."""
     window.views["ai-grammar"]._model_combo.setEditText("tray-test-model")
-    window.views["chat2api"]._fields[("server", "port")].edit.setText("8123")
 
 
 def test_toolbar_has_settings_button_that_opens_dialog(window, monkeypatch):
