@@ -78,3 +78,29 @@ def test_default_log_path_uses_cache_logs_directory(monkeypatch, tmp_path):
         tmp_path / ".cache" / "ai-backends" / "logs" / "textkit.log"
     )
     assert not result.parent.exists()
+
+
+def test_five_service_status_and_hyphenated_restart(qtbot, tmp_path):
+    from PyQt6.QtCore import QProcess
+
+    from ai_manager.services.supervisor import SupervisorManager, parse_supervisor_status
+
+    text = """[2026-10-17 16:07:34] supervisor running: 34491
+ai-grammar   running  pid=101 log=/tmp/logs/ai-grammar.log
+textkit      running  pid=102 log=/tmp/logs/textkit.log
+yt2txt       stopped  pid=- log=/tmp/logs/yt2txt.log
+chat2api     running  pid=104 log=/tmp/logs/chat2api.log
+file-bridge  running  pid=105 log=/tmp/logs/file-bridge.log
+"""
+    status = parse_supervisor_status(text)
+    assert len(status.services) == 5 and status.services["yt2txt"].pid is None
+    assert status.services["file-bridge"].state == ServiceRunState.RUNNING
+    assert status.services["file-bridge"].pid == 105
+    assert status.services["file-bridge"].log_path == "/tmp/logs/file-bridge.log"
+    manager = SupervisorManager(tmp_path)
+    manager._action_process = MagicMock()
+    manager._action_process.state.return_value = QProcess.ProcessState.NotRunning
+    manager.restart_service("file-bridge")
+    manager._action_process.start.assert_called_once_with(
+        manager.executable, ["restart", "file-bridge"]
+    )

@@ -20,7 +20,9 @@ def test_fetch_models_standard_openai():
         )
     )
 
-    req = ModelFetchRequest(token=1, api_base="http://localhost:3000", api_key="sk-test")
+    req = ModelFetchRequest(
+        token=1, api_base="http://localhost:3000", api_key="sk-test", app_id="ai-grammar"
+    )
     resp = fetch_models_sync(req)
     assert resp.success is True
     assert resp.token == 1
@@ -48,7 +50,9 @@ def test_fetch_models_fallback_endpoint():
         )
     )
 
-    req = ModelFetchRequest(token=2, api_base="http://localhost:11434", api_key="")
+    req = ModelFetchRequest(
+        token=2, api_base="http://localhost:11434", api_key="", app_id="textkit"
+    )
     resp = fetch_models_sync(req)
     assert resp.success is True
     assert resp.token == 2
@@ -62,7 +66,9 @@ def test_fetch_models_unauthorized():
         return_value=httpx.Response(401, json={"error": "Invalid API key"})
     )
 
-    req = ModelFetchRequest(token=3, api_base="https://api.openai.com", api_key="sk-bad")
+    req = ModelFetchRequest(
+        token=3, api_base="https://api.openai.com", api_key="sk-bad", app_id="yt2txt"
+    )
     resp = fetch_models_sync(req)
     assert resp.success is False
     assert "401" in (resp.error_message or "")

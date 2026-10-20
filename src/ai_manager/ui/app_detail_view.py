@@ -1,6 +1,6 @@
 from pathlib import Path
 from typing import List, Optional
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -9,6 +9,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QTabWidget,
@@ -37,10 +38,12 @@ from ai_manager.ui.widgets.status_badge import StatusBadge
 class AppDetailView(QWidget):
     """Detailed view for configuring a target application."""
 
-    save_requested = pyqtSignal(str, AppAIConfig, bool)  # app_id, config, should_restart
+    # Payloads are ``object`` so one Qt connection signature serves both the LLM
+    # and structured adapters stored in ``MainWindow.views``.
+    save_requested = pyqtSignal(str, object, bool)  # app_id, config, should_restart
     restart_requested = pyqtSignal(str)
     fetch_models_requested = pyqtSignal(ModelFetchRequest)
-    config_changed = pyqtSignal(str, AppAIConfig)
+    config_changed = pyqtSignal(str, object)
 
     def __init__(self, app_meta: AppMetadata, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -86,6 +89,16 @@ class AppDetailView(QWidget):
         header_layout.addWidget(self._restart_btn)
         main_layout.addWidget(header_frame)
 
+        # Plain-text save/validation outcome, mirroring the structured adapter.
+        self._config_error_label = QLabel(self)
+        self._config_error_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._config_error_label.setWordWrap(True)
+        self._config_error_details = QPlainTextEdit(self)
+        self._config_error_details.setReadOnly(True)
+        self._config_error_details.hide()
+        main_layout.addWidget(self._config_error_label)
+        main_layout.addWidget(self._config_error_details)
+
         # Scroll Area for forms
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -96,6 +109,7 @@ class AppDetailView(QWidget):
 
         # Group 1: Provider Settings
         provider_group = QGroupBox("AI Provider Settings", content_widget)
+        self._provider_group = provider_group
         p_layout = QVBoxLayout(provider_group)
         p_layout.setSpacing(8)
 
@@ -135,6 +149,7 @@ class AppDetailView(QWidget):
 
         # Group 2: Model Settings
         model_group = QGroupBox("Model Configuration", content_widget)
+        self._model_group = model_group
         m_layout = QVBoxLayout(model_group)
         m_layout.setSpacing(8)
 
@@ -274,6 +289,30 @@ class AppDetailView(QWidget):
             text_model=self._text_combo.currentText().strip() if is_split else None,
         )
 
+    def adopt_saved_baseline(self, config: AppAIConfig, *, preserve_draft: bool) -> None:
+        """Install a committed config as the baseline without losing a draft.
+
+        With ``preserve_draft`` the controls keep their current values, so the
+        user's unsaved edits survive a dependent rewrite; ``_current_config``
+        still moves to the committed snapshot.
+        """
+        self._current_config = config.model_copy(deep=True)
+        if not preserve_draft:
+            self.load_config(config)
+
+    def show_config_error(self, message: str, detail: str = "") -> None:
+        """Show a plain-text save outcome; ``detail`` opens the exact log text."""
+        self._config_error_label.setText(message)
+        self._config_error_details.setPlainText(detail)
+        self._config_error_details.setVisible(bool(detail))
+
+    def set_save_in_progress(self, saving: bool) -> None:
+        """Disable configuration editing only; logs and restart stay available."""
+        self._provider_group.setEnabled(not saving)
+        self._model_group.setEnabled(not saving)
+        self._save_only_btn.setEnabled(not saving)
+        self._save_restart_btn.setEnabled(not saving)
+
     def update_service_status(self, status: ServiceStatus) -> None:
         if status.log_path:
             self._known_log_path = str(status.log_path)
@@ -341,6 +380,7 @@ class AppDetailView(QWidget):
             token=self._fetch_token,
             api_base=self._base_url_edit.text().strip(),
             api_key=self._key_edit.text().strip(),
+            app_id=self.app_meta.id,
         )
         self._fetch_status_label.setText("Fetching models from provider...")
         self._fetch_status_label.setStyleSheet("font-size: 11px; color: #3b82f6;")

@@ -1,13 +1,10 @@
 """Integration tests for MainWindow tray, settings and quit behaviour.
 
-The workspace fixture setup mirrors ``tests/test_main_window.py`` so the
-window builds against the same fake managed applications. Settings
-loading/persistence is isolated so the developer's real
+The shared ``five_app_workspace`` fixture supplies the five registered
+application directories so these lifecycle assertions cover the structured
+views too. Settings loading/persistence is isolated so the developer's real
 ``~/.config/ai-manager/settings.json`` is never read or written.
 """
-
-import shutil
-from pathlib import Path
 
 import pytest
 from PyQt6.QtWidgets import QMessageBox
@@ -18,34 +15,18 @@ from ai_manager.ui.main_window import MainWindow
 
 
 @pytest.fixture
-def window(qtbot, tmp_path, monkeypatch):
-    """Build a MainWindow against copied fixtures with isolated settings."""
-    fixtures_dir = Path(__file__).parent / "fixtures"
-    for d in ["ai-grammar", "textkit", "yt2txt"]:
-        (tmp_path / d / "backend").mkdir(parents=True)
-
-    shutil.copy2(
-        fixtures_dir / "ai_grammar_config.yaml",
-        tmp_path / "ai-grammar" / "backend" / "config.yaml",
-    )
-    shutil.copy2(
-        fixtures_dir / "textkit_unified_config.yaml",
-        tmp_path / "textkit" / "backend" / "config.yaml",
-    )
-    shutil.copy2(
-        fixtures_dir / "yt2txt_config.yaml",
-        tmp_path / "yt2txt" / "backend" / "config.yaml",
-    )
-
+def window(qtbot, five_app_workspace, monkeypatch):
+    """Build a MainWindow against the five-app workspace with isolated settings."""
     monkeypatch.setattr(main_window_module, "load_user_settings", lambda: UserSettings())
     monkeypatch.setattr(main_window_module, "save_user_settings", lambda settings: None)
 
-    win = MainWindow(workspace_root=tmp_path)
+    win = MainWindow(workspace_root=five_app_workspace)
     qtbot.addWidget(win)
     return win
 
 
 def _dirty_draft(window: MainWindow) -> None:
+    """Make the LLM (ai-grammar) draft dirty, and only that draft."""
     window.views["ai-grammar"]._model_combo.setEditText("tray-test-model")
 
 
@@ -184,3 +165,22 @@ def test_start_minimized_override_and_default(qtbot, window):
     qtbot.addWidget(defaulted)
     assert defaulted.settings.start_minimized is False
     assert defaulted.is_minimized_at_startup is False
+
+
+def test_structured_dirty_quit_cancel_keeps_raw_draft(
+    qtbot, five_app_workspace, monkeypatch
+):
+    from ai_manager.ui import main_window as mw
+
+    window = mw.MainWindow(workspace_root=five_app_workspace)
+    qtbot.addWidget(window)
+    view = window.views["chat2api"]
+    view._on_raw_options_changed(view._model.rows[0].id, "{broken")
+    exited = []
+    monkeypatch.setattr(window, "_exit_application", lambda: exited.append(True))
+    monkeypatch.setattr(
+        mw.QMessageBox, "question", lambda *a: mw.QMessageBox.StandardButton.Cancel
+    )
+    window.handle_quit()
+    assert not exited and window.has_unsaved_changes()
+    assert view.get_current_draft().raw_option_edits == {"echo-1": "{broken"}
