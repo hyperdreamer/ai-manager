@@ -7,7 +7,16 @@ directories are never touched.
 
 import pytest
 
+from unittest.mock import MagicMock, call
+
+from PyQt6.QtCore import QPoint, Qt, QTimer
+from PyQt6.QtWidgets import (
+    QApplication, QDialog, QDialogButtonBox, QHBoxLayout, QPushButton,
+)
+
 from ai_manager.config.models import ThemeMode, UserSettings
+from ai_manager.ui import settings_dialog as settings_dialog_module
+from ai_manager.ui.about_dialog import AboutDialog
 from ai_manager.ui.settings_dialog import SettingsDialog
 
 
@@ -200,3 +209,158 @@ def test_cancel_rejects_without_saving(qtbot, settings, service):
 
     assert dlg.result() == 0  # QDialog.DialogCode.Rejected
     assert service.autostart_calls == []
+
+
+def _about_snapshot(settings, dlg, service):
+    return (
+        settings.model_dump(),
+        dlg.settings.model_dump(),
+        (
+            dlg.chk_close_to_tray.isChecked(),
+            dlg.chk_start_minimized.isChecked(),
+            dlg.chk_autostart.isChecked(),
+            dlg.cmb_theme.currentData(),
+            dlg.cmb_poll_interval.currentData(),
+        ),
+        list(service.autostart_calls),
+        service.install_calls,
+        service.remove_calls,
+    )
+
+
+def test_about_button_sits_left_of_action_buttons(dialog):
+    assert isinstance(dialog.btn_about, QPushButton)
+    assert dialog.btn_about.text() == "About ai-manager"
+    assert dialog.btn_about.parentWidget() is dialog
+    boxes = dialog.findChildren(QDialogButtonBox)
+    assert len(boxes) == 1
+    box = boxes[0]
+    assert dialog.btn_about not in box.buttons()
+    assert box.orientation() == Qt.Orientation.Horizontal
+    assert box.standardButtons() == (
+        QDialogButtonBox.StandardButton.Save
+        | QDialogButtonBox.StandardButton.Cancel
+    )
+    assert box.button(QDialogButtonBox.StandardButton.Save) is dialog.btn_save
+    assert box.button(QDialogButtonBox.StandardButton.Cancel) is dialog.btn_cancel
+    assert dialog.btn_save.text() == "Save && Apply"
+    assert dialog.btn_cancel.text() == "Cancel"
+    assert set(box.buttons()) == {dialog.btn_save, dialog.btn_cancel}
+    outer = dialog.layout()
+    footer = outer.itemAt(outer.count() - 1).layout()
+    assert isinstance(footer, QHBoxLayout)
+    assert footer.count() == 3
+    assert footer.itemAt(0).widget() is dialog.btn_about
+    spacer = footer.itemAt(1).spacerItem()
+    assert spacer is not None
+    assert spacer.expandingDirections() & Qt.Orientation.Horizontal
+    assert footer.stretch(1) == 1
+    assert footer.itemAt(2).widget() is box
+    dialog.show()
+    outer.activate()
+    footer.activate()
+    box.layout().activate()
+    QApplication.processEvents()
+    about_right = (
+        dialog.btn_about.mapTo(dialog, QPoint(0, 0)).x()
+        + dialog.btn_about.width()
+    )
+    for btn_x in (dialog.btn_save, dialog.btn_cancel):
+        assert about_right <= btn_x.mapTo(dialog, QPoint(0, 0)).x()
+
+
+@pytest.mark.parametrize("tray_available", [True, False])
+def test_about_button_opens_about_without_saving(
+    qtbot, settings, service, monkeypatch, mock_tray_available, tray_available
+):
+    mock_tray_available(tray_available)
+    dlg = SettingsDialog(settings, service)
+    qtbot.addWidget(dlg)
+    dlg.chk_autostart.setChecked(True)
+    before = _about_snapshot(settings, dlg, service)
+    saved, accepted, rejected = [], [], []
+    dlg.settings_saved.connect(saved.append)
+    dlg.accepted.connect(lambda: accepted.append(True))
+    dlg.rejected.connect(lambda: rejected.append(True))
+    instance = MagicMock()
+    factory = MagicMock(return_value=instance)
+    monkeypatch.setattr(settings_dialog_module, "AboutDialog", factory)
+
+    dlg.btn_about.click()
+
+    factory.assert_called_once_with(parent=dlg)
+    instance.exec.assert_called_once_with()
+    assert saved == []
+    assert accepted == []
+    assert rejected == []
+    assert _about_snapshot(settings, dlg, service) == before
+    assert dlg.chk_autostart.isChecked() is True
+
+
+def test_about_button_constructs_fresh_dialog_each_time(dialog, monkeypatch):
+    saved = []
+    dialog.settings_saved.connect(saved.append)
+    first, second = MagicMock(), MagicMock()
+    factory = MagicMock(side_effect=[first, second])
+    monkeypatch.setattr(settings_dialog_module, "AboutDialog", factory)
+
+    dialog.btn_about.click()
+    dialog.btn_about.click()
+
+    assert factory.call_args_list == [call(parent=dialog), call(parent=dialog)]
+    first.exec.assert_called_once_with()
+    second.exec.assert_called_once_with()
+    assert saved == []
+
+
+def test_about_click_uses_real_dialog_parented_to_settings(
+    qtbot, settings, service, dialog, monkeypatch
+):
+    dlg = dialog
+    dlg.chk_autostart.setChecked(True)
+    before = _about_snapshot(settings, dlg, service)
+    saved, accepted, rejected = [], [], []
+    dlg.settings_saved.connect(saved.append)
+    dlg.accepted.connect(lambda: accepted.append(True))
+    dlg.rejected.connect(lambda: rejected.append(True))
+    instances = []
+
+    def recorder(self):
+        qtbot.addWidget(self)
+        instances.append((self, self.parentWidget()))
+        return 1
+
+    monkeypatch.setattr(AboutDialog, "exec", recorder)
+    observed = []
+
+    def click_and_capture():
+        try:
+            dlg.btn_about.click()
+            observed.append((
+                dlg.isVisible(),
+                dlg.isModal(),
+                dlg.result(),
+                _about_snapshot(settings, dlg, service),
+                list(saved),
+                list(accepted),
+                list(rejected),
+                dlg.chk_autostart.isChecked(),
+            ))
+        finally:
+            dlg.reject()
+
+    dlg.show()
+    QTimer.singleShot(0, click_and_capture)
+    assert dlg.exec() == QDialog.DialogCode.Rejected
+
+    assert len(instances) == 1
+    about, supplied_parent = instances[0]
+    assert isinstance(about, AboutDialog)
+    assert supplied_parent is dlg
+    assert about.parentWidget() is dlg
+    assert about.isModal() is True
+    assert observed == [(
+        True, True, QDialog.DialogCode.Rejected, before, [], [], [], True
+    )]
+    assert saved == []
+    assert accepted == []

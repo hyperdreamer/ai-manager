@@ -29,6 +29,7 @@ from PyQt6.QtWidgets import (
 
 from ai_manager.config.models import ThemeMode, UserSettings
 from ai_manager.services.desktop_integration import DesktopIntegrationService
+from ai_manager.ui.about_dialog import AboutDialog
 
 # Poll intervals offered in the General Preferences section.
 POLL_INTERVAL_OPTIONS = (2000, 4000, 6000, 10000)
@@ -66,7 +67,7 @@ class SettingsDialog(QDialog):
         layout.addWidget(self._build_desktop_group())
         layout.addWidget(self._build_general_group())
         layout.addStretch(1)
-        layout.addWidget(self._build_button_box())
+        layout.addLayout(self._build_footer())
 
     def _build_system_group(self) -> QGroupBox:
         group = QGroupBox("System Integration", self)
@@ -165,6 +166,19 @@ class SettingsDialog(QDialog):
         button_box.accepted.connect(self._on_save)
         button_box.rejected.connect(self.reject)
         return button_box
+
+    def _build_footer(self) -> QHBoxLayout:
+        footer = QHBoxLayout()
+        self.btn_about = QPushButton("About ai-manager", self)
+        self.btn_about.clicked.connect(self._open_about_dialog)
+        footer.addWidget(self.btn_about)
+        footer.addStretch(1)
+        footer.addWidget(self._build_button_box())
+        return footer
+
+    def _open_about_dialog(self) -> None:
+        dialog = AboutDialog(parent=self)
+        dialog.exec()
 
     # ------------------------------------------------------------------
     # State synchronisation
