@@ -1,0 +1,109 @@
+# Execution graph for docs/superpowers/plans/2026-10-20-app-version-display.md
+# Generated from the plan and the lane/interface map; never hand-edited.
+source_plan:
+  path: docs/superpowers/plans/2026-10-20-app-version-display.md
+  sha256: c74533424e084258bf0e60d1668cb022f9744d191bba5e74ff35fa8d061decaa
+lanes:
+  - id: lane-about
+    task_ids: [T-001]
+    sequence: [T-001]
+  - id: lane-tray
+    task_ids: [T-002]
+    sequence: [T-002]
+  - id: lane-settings
+    task_ids: [T-003]
+    sequence: [T-003]
+  - id: lane-release
+    task_ids: [T-004]
+    sequence: [T-004]
+interfaces:
+  - id: I-001
+    signature: "AboutDialog.__init__(self, parent: Optional[QWidget] = None, version: Optional[str] = None) -> None"
+    sha256: 2bc851388f8108c7ba78d8cc77949fc40559e25ade922c0cc9ee98be5c2e11e4
+    producer: T-001
+    consumers: [T-002, T-003]
+tasks:
+  - id: T-001
+    plan_task: 1
+    title: "Build and test the leaf About dialog"
+    lane: lane-about
+    sequence: 1
+    tier: Economy
+    owns: ["src/ai_manager/ui/about_dialog.py", "tests/test_about_dialog.py"]
+    resources: []
+    depends_on: []
+    produces: [I-001]
+    consumes: []
+    interfaces:
+      produces: [I-001]
+      consumes: []
+    validation:
+      - argv: ["env", "PYTHONPATH=src", "QT_QPA_PLATFORM=offscreen", "python", "-m", "pytest", "tests/test_about_dialog.py", "tests/test_mnemonic.py", "-q"]
+        cwd: .
+        timeout_seconds: 600
+      - argv: ["env", "AI_WORKSPACE_ROOT=/data/home/guest/Development/ai", "PYTHONPATH=src", "QT_QPA_PLATFORM=offscreen", "python", "-m", "pytest", "tests/", "-q"]
+        cwd: .
+        timeout_seconds: 900
+  - id: T-002
+    plan_task: 2
+    title: "Add the versioned title and tray About entry point"
+    lane: lane-tray
+    sequence: 1
+    tier: Advanced
+    owns: ["src/ai_manager/ui/system_tray.py", "src/ai_manager/ui/main_window.py", "tests/test_system_tray.py", "tests/test_main_window.py"]
+    resources: []
+    depends_on: [T-001]
+    produces: []
+    consumes: [I-001]
+    interfaces:
+      produces: []
+      consumes: [I-001]
+    validation:
+      - argv: ["env", "PYTHONPATH=src", "QT_QPA_PLATFORM=offscreen", "python", "-m", "pytest", "tests/test_system_tray.py", "tests/test_main_window.py", "tests/test_mnemonic.py", "-q"]
+        cwd: .
+        timeout_seconds: 600
+      - argv: ["env", "AI_WORKSPACE_ROOT=/data/home/guest/Development/ai", "PYTHONPATH=src", "QT_QPA_PLATFORM=offscreen", "python", "-m", "pytest", "tests/", "-q"]
+        cwd: .
+        timeout_seconds: 900
+  - id: T-003
+    plan_task: 3
+    title: "Add the Settings footer and verify modal ownership without saving"
+    lane: lane-settings
+    sequence: 1
+    tier: Advanced
+    owns: ["src/ai_manager/ui/settings_dialog.py", "tests/test_settings_dialog.py"]
+    resources: []
+    depends_on: [T-001]
+    produces: []
+    consumes: [I-001]
+    interfaces:
+      produces: []
+      consumes: [I-001]
+    validation:
+      - argv: ["env", "PYTHONPATH=src", "QT_QPA_PLATFORM=offscreen", "python", "-m", "pytest", "tests/test_settings_dialog.py", "tests/test_mnemonic.py", "-q"]
+        cwd: .
+        timeout_seconds: 600
+      - argv: ["env", "AI_WORKSPACE_ROOT=/data/home/guest/Development/ai", "PYTHONPATH=src", "QT_QPA_PLATFORM=offscreen", "python", "-m", "pytest", "tests/", "-q"]
+        cwd: .
+        timeout_seconds: 900
+  - id: T-004
+    plan_task: 4
+    title: "Derive packaging version and validate release documentation"
+    lane: lane-release
+    sequence: 1
+    tier: Standard
+    owns: ["pyproject.toml", "README.md", "tests/test_version.py", "tests/test_readme_documents_version.py"]
+    resources: []
+    depends_on: [T-001, T-002]
+    produces: []
+    consumes: []
+    interfaces:
+      produces: []
+      consumes: []
+    validation:
+      - argv: ["env", "PYTHONPATH=src", "QT_QPA_PLATFORM=offscreen", "python", "-m", "pytest", "tests/test_version.py", "tests/test_readme_documents_version.py", "-q"]
+        cwd: .
+        timeout_seconds: 600
+      - argv: ["env", "AI_WORKSPACE_ROOT=/data/home/guest/Development/ai", "PYTHONPATH=src", "QT_QPA_PLATFORM=offscreen", "python", "-m", "pytest", "tests/", "-q"]
+        cwd: .
+        timeout_seconds: 900

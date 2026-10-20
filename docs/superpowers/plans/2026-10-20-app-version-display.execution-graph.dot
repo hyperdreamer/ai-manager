@@ -1,0 +1,28 @@
+digraph execution_graph {
+    rankdir=LR;
+    node [shape=box, style=rounded, fontname="Helvetica"];
+    subgraph cluster_lane-about {
+        label="lane-about";
+        style="rounded";
+        T-001 [label="Task 1: Build and test the leaf About dialog\nEconomy"];
+    }
+    subgraph cluster_lane-tray {
+        label="lane-tray";
+        style="rounded";
+        T-002 [label="Task 2: Add the versioned title and tray About entry point\nAdvanced"];
+    }
+    subgraph cluster_lane-settings {
+        label="lane-settings";
+        style="rounded";
+        T-003 [label="Task 3: Add the Settings footer and verify modal ownership without saving\nAdvanced"];
+    }
+    subgraph cluster_lane-release {
+        label="lane-release";
+        style="rounded";
+        T-004 [label="Task 4: Derive packaging version and validate release documentation\nStandard"];
+    }
+    T-001 -> T-002;
+    T-001 -> T-003;
+    T-001 -> T-004;
+    T-002 -> T-004;
+}
