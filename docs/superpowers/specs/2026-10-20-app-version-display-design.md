@@ -125,8 +125,13 @@ editable installs.
 ```python
 class AboutDialog(QDialog):
     def __init__(self, parent: Optional[QWidget] = None,
-                 version: str = __version__) -> None: ...
+                 version: Optional[str] = None) -> None:
+        self.version = __version__ if version is None else version
 ```
+
+- The default is resolved **inside** `__init__`. A default-argument expression
+  (`version: str = __version__`) would freeze the value at import time and defeat
+  the single-source guarantee for any later version change; it is forbidden.
 
 - Window title `About ai-manager`; modal; fixed width (~360 px); no size grip.
 - Content, top to bottom: 48 px application icon (`color_icon()` from
@@ -138,9 +143,12 @@ class AboutDialog(QDialog):
   connects that button's `clicked` signal to `self.accept()`. Closing must yield
   `QDialog.DialogCode.Accepted`, and the test asserts that result; a design that
   wired only the button box's `accepted` signal would never fire.
-- Read-only: it takes no settings object, performs no IO, emits no signals, and
-  never touches `desktop_service`. `version` is injectable so tests can assert the
-  rendered string without coupling to the current release number.
+- Read-only: it takes no settings object, performs no settings, configuration, or
+  desktop-service IO, defines no application-specific signals, and never touches
+  `desktop_service`. Standard Qt dialog lifecycle signals (`accepted`, `finished`)
+  still occur, and reading the packaged icon through `color_icon()` is allowed.
+  `version` is injectable so tests can assert the rendered string without coupling
+  to the current release number.
 
 Why a QDialog rather than `QMessageBox.about(...)`: the message-box helper renders
 unassertable rich text, ignores the application stylesheet, and cannot host the
@@ -168,12 +176,17 @@ provenance block we deferred. A ~40-line module is the smaller long-term cost.
 
 **`src/ai_manager/ui/settings_dialog.py`**
 
-- Add an `About ai-manager` button to the existing `QDialogButtonBox` via
-  `addButton(..., ActionRole)`, so it sits on the left of Save/Cancel and does not
-  participate in `accepted`/`rejected`.
+- Add a footer row: a left-aligned `About ai-manager` push button (`self.btn_about`),
+  a stretch, then the existing Save/Cancel `QDialogButtonBox`.
 - The button opens `AboutDialog(parent=self).exec()` **directly**. Parenting the
   About box to the modal settings dialog keeps it interactive; routing it through
   `MainWindow` would open a dialog owned by an input-blocked parent.
+- Why not an `ActionRole` button inside the existing button box: a Fusion-style
+  probe of the real construction produced `Save | About ai-manager | Cancel`, so
+  the role does not express "left of both" and the resulting geometry is
+  style-dependent. A footer row is deterministic, keeps About visually separate
+  from commit actions, and matches desktop convention. `Save`/`Cancel` keep their
+  current button box, texts, and signal wiring.
 
 ### 3.3 Adjacent pre-existing defect (included)
 
@@ -209,7 +222,7 @@ loud, immediate failure rather than a silently wrong title.
 | `tests/test_about_dialog.py` | Window title, name label, `Version <version>` text, description, object names; injected version override; clicking Close yields `QDialog.DialogCode.Accepted`; ampersand sweep returns `[]`. |
 | `tests/test_main_window.py` (added case) | `window.windowTitle()` contains `f"v{__version__}"` **and** still contains `&`. |
 | `tests/test_system_tray.py` | Expanded order/structure test includes `About ai-manager`; triggering the action emits `about_requested`. |
-| `tests/test_settings_dialog.py` | About button exists in the button box; invoking it execs `AboutDialog` (patched seam) and does not emit `settings_saved`. |
+| `tests/test_settings_dialog.py` | About button exists in a footer row, left of the Save/Cancel box; invoking it execs `AboutDialog(parent=dialog)` and does not emit `settings_saved` or alter any pending edit. |
 
 Verification commands (pinned because the e2e test resolves its workspace from the
 process cwd, which differs inside a PM lane worktree):
