@@ -287,6 +287,7 @@ def test_dialogs_accept_and_reject_cleanly_without_parent(qtbot, five_app_worksp
 # ---------------------------------------------------------------------------
 
 import json
+import json
 import os
 
 import pytest
@@ -1120,3 +1121,73 @@ def test_create_from_example_survives_an_unexpected_failure(qtbot, tmp_path):
 
     assert errors, "the failure must be reported to the user"
     assert "example" in errors[0].lower()
+
+
+
+# ------------------------------------------------- crash-resistance of slots
+
+
+@pytest.fixture
+def chat2api_view(qtbot, tmp_path):
+    """A loaded chat2api view over a throw-away config."""
+    from ai_manager.config.models import AppMetadata
+    from ai_manager.config.structured_config import load
+
+    config = tmp_path / "config.json"
+    config.write_text(
+        json.dumps(
+            {"server": {"port": 8000}, "models": {"e": {"provider": "echo"}}}
+        ),
+        encoding="utf-8",
+    )
+    meta = AppMetadata(
+        id="chat2api",
+        display_name="chat2api",
+        relative_path=tmp_path,
+        config_file_name="config.json",
+        example_config_file_name="config.example.json",
+        default_port=8000,
+        config_kind="chat2api",
+    )
+    view = StructuredConfigView(meta)
+    qtbot.addWidget(view)
+    view.load_config(load("chat2api", config))
+    return view
+
+
+def test_pasting_a_huge_integer_does_not_abort_the_process(qtbot, chat2api_view):
+    """5000 digits match the integer pattern but exceed CPython's digit limit.
+
+    ``int()`` then raises ValueError inside a ``textChanged`` slot; an escaping
+    exception terminates the application instead of reporting a field error.
+    """
+    control = chat2api_view._fields[("server", "port")]
+
+    control.edit.setText("9" * 5000)
+
+    # The text is kept verbatim so validation can report it; it must not crash.
+    assert control.edit.text() == "9" * 5000
+    assert isinstance(control._parse(control.edit.text()), str)
+
+
+def test_pasting_deeply_nested_raw_options_does_not_abort(qtbot, chat2api_view):
+    """``json`` recurses, so a few hundred nested brackets raise RecursionError.
+
+    That happens in a ``textChanged`` slot, and only ``ConfigError`` was caught.
+    """
+    row_id = chat2api_view._model.rows[0].id
+    deep = "[" * 500 + "]" * 500
+
+    chat2api_view._on_raw_options_changed(row_id, '{"future":' + deep + "}")
+
+    # Still a working editable draft; the pathological paste changes no value.
+    assert chat2api_view.get_current_draft() is not None
+
+
+def test_ordinary_raw_options_still_apply(qtbot, chat2api_view):
+    row_id = chat2api_view._model.rows[0].id
+
+    chat2api_view._on_raw_options_changed(row_id, '{"future": [[1, 2]]}')
+
+    draft = chat2api_view.get_current_draft()
+    assert draft is not None

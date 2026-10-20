@@ -1194,6 +1194,25 @@ supervisor-level `--host`/`--port` override that supersedes config. The end-to-e
 proof that the launcher really binds and serves a non-default port lives in Target B's
 own acceptance test (`tests/test_launcher.py`), not in the GUI gate.
 
+#### 7.3.3a What redaction deliberately does NOT do
+
+Diagnostics are redacted for *values*: anything pydantic dumps under `input_value=`, and
+values of options named `password`, `account`, `access_token`, `api_key`, `token`,
+`secure_1psid*`.
+
+Identifiers are **not** redacted, deliberately:
+
+- a model key (`models.<name>`) is user-chosen and is displayed in the models table
+  anyway; hiding it from an error would make the error unusable;
+- `server.auth_token_env` holds the *name* of an environment variable, never its value.
+  The service's own message quotes that name precisely so the operator can see which
+  variable is unset. Redacting it would defeat the diagnostic.
+
+If an operator chooses to place secret material inside a model name or an environment
+variable name, it can appear in diagnostics. That is user-supplied identifier data, not
+a credential the editor holds, and the editor cannot distinguish it from a legitimate
+name without corrupting every error it reports.
+
 #### 7.3.4 Caching and UI effect
 
 Run once per resolved application directory per `MainWindow` session and cache the

@@ -217,8 +217,16 @@ class PresenceControl(QWidget):
                 return text
         if self.control == "integer":
             # Text that is not an integer stays text so validation reports it
-            # instead of this widget substituting a legal number.
-            return int(text) if re.fullmatch(r"[+-]?[0-9]+", text) else text
+            # instead of this widget substituting a legal number. The digit-limit
+            # ValueError must be caught too: 4300 digits match the pattern but
+            # ``int`` refuses them, and this runs inside a textChanged slot, where
+            # an escaping exception aborts the process.
+            if re.fullmatch(r"[+-]?[0-9]+", text) is None:
+                return text
+            try:
+                return int(text)
+            except ValueError:
+                return text
         if self.control == "boolean":
             return text.lower() == "true" if text.lower() in ("true", "false") else text
         return text

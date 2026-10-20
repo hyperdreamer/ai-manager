@@ -126,6 +126,26 @@ def _option_edits(
     return edits
 
 
+#: Maximum nesting accepted in the raw-options editor. Well below the copy and
+#: decoder limits so a pasted document cannot reach ``RecursionError`` in a slot.
+_MAX_RAW_DEPTH = 16
+
+
+def _depth_exceeds(value: object, limit: int) -> bool:
+    """Whether *value* nests deeper than *limit* containers."""
+    stack: list[tuple[object, int]] = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if depth > limit:
+            return True
+        if isinstance(node, dict):
+            stack.extend((child, depth + 1) for child in node.values())
+        elif isinstance(node, list):
+            stack.extend((child, depth + 1) for child in node)
+    return False
+
+
+
 @dataclass
 class ModelRow:
     id: int
@@ -375,9 +395,17 @@ class StructuredEditorModel:
         specs = PROVIDER_OPTIONS.get(row.route.get("provider"), ())
         return {spec.key for spec in specs} | SECRET_OPTION_KEYS
 
+
     @staticmethod
     def _parse_raw(text: str) -> dict[str, Any] | None:
         try:
-            return _json_object(text)
-        except (TypeError, ValueError):
+            parsed = _json_object(text)
+        except (TypeError, ValueError, RecursionError):
+            # Invalid text stays a field issue. RecursionError joins the handled
+            # set because json's decoder recurses: a few hundred nested brackets
+            # typed into the raw-options editor raise here, and this runs from a
+            # textChanged slot where an escaping exception aborts the process.
             return None
+        if _depth_exceeds(parsed, _MAX_RAW_DEPTH):
+            return None
+        return parsed
