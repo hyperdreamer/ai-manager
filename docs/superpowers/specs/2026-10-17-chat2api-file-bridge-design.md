@@ -180,8 +180,10 @@ Therefore:
 - Independently of delivery mechanics, the editor is gated on runtime evidence:
   chat2api's `host`/`port` fields and the blast-radius rewrite remain
   **read-only** until the launcher is confirmed to honor configuration. The
-  check is behavioural, not version-based: start the launcher with a temporary
-  config on an ephemeral port and confirm something binds there. The gate
+  check is behavioural, not version-based: ask the launcher for the listener it
+  would use via `--print-listener` (amended per pivot question 15; the original
+  socket-bind formulation is superseded because it could not be isolated in
+  process). It binds nothing and is safe while the real service is live. The gate
   result is cached per session and surfaced inline as
   *"launcher honors config — host/port editable"* or
   *"launcher does not honor config — install Target B first"*.

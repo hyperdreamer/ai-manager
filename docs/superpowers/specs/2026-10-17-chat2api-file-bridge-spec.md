@@ -1296,7 +1296,7 @@ succeeds: port-in-use, missing dependencies, absent provider credentials, and
 runtime login/discovery failures are outside its scope and are reported by the
 supervisor's restart outcome, never inferred from a successful save.
 
-The gate proves the installed launcher behavior for the fixture, not arbitrary runtime provider/login success or freedom from port conflicts. An already occupied default port does not affect fixture readiness on its ephemeral port with the fixed launcher.
+The gate proves that the installed launcher advertises the `--print-listener` capability and reports the same listener ai-manager derives from the same config. It does **not** prove runtime provider/login success, freedom from port conflicts, or that a restart will bind. Those remain Target B's acceptance-test concern (§7.3.3).
 
 ## 8. Qt adapter and orchestration contracts
 
@@ -2211,9 +2211,20 @@ Locate preset by id, assert default env name exactly CHAT2API_TOKEN; selecting p
 1. Inject failed LauncherProbeResult with stderr: host/port disabled, inline failed text, no D7 action; edit models and save with valid auth config still allowed. Submit a forged host mutation and assert refusal before disk write.
 2. Inject success: host/port enabled, passed text, D7 detection enabled. Pending result has disabled fields and pending text.
 3. Construct/select/reload the chat view several times: exactly one probe per resolved app-dir/session; new MainWindow session probes again.
-4. Exercise actual `probe_launcher` against a temporary copy of the real B application and fixed launcher using §7.3 echo/null fixture: configured port accepts, subprocess always reaped. Against the original baseline launcher body (`B/start.sh:29`), result fails and no child remains after timeout/early exit. Never run the old launcher against the live B config.
-5. Deterministic probe harness exits nonzero with stderr `fixture launcher failed\n` before bind: result returns early, contains exact stderr/exit code, does not consume the full readiness deadline, and wait/reap occurs.
-6. Timeout and assertion-error cleanup paths both terminate/kill as needed and reap. Fill stderr beyond pipe-buffer size in a fixture child to prove capture cannot block readiness polling.
+4. Exercise actual `probe_launcher` against the real B launcher using the §7.3
+   echo/null fixture: the fixed launcher passes and reports the configured listener;
+   the pre-fix baseline (`c40e3c6:start.sh`) fails closed. **Neither case binds a
+   socket** — see §7.3.3 and the amendment note. The live-bind readiness proof lives
+   in B's own `tests/test_launcher.py`, not here. Never run the old launcher against
+   the live B config.
+5. **(Superseded by the §7.3 amendment.)** The historical harness asserted early-exit
+   behaviour against a readiness deadline and pipe-buffer back-pressure. Under the
+   capability-flag design the gate spawns nothing but `start.sh --print-listener`, so
+   those cases are covered instead by the unit tests for non-zero exit, timeout, and
+   captured-stderr propagation.
+6. **(Superseded by the §7.3 amendment.)** Readiness polling and process-group
+   escalation no longer exist on this path; `subprocess.run` awaits and reaps the single
+   child. The timeout case is asserted directly.
 
 ### 12.10 `tests/test_fetch_routing.py`
 

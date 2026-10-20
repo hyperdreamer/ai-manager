@@ -533,3 +533,60 @@ def test_signals_declare_string_and_object_payloads():
 
     assert [name for name, _, _ in delivered] == ["save_finished", "save_failed", "probe_finished"]
     assert all(app_id == "chat2api" and got is payload for _, app_id, got in delivered)
+
+
+# ------------------------------------------------------- credential redaction
+
+
+def test_capability_failure_never_surfaces_credentials(tmp_path):
+    """A validation error must not leak option values into the details panel.
+
+    The launcher runs the service's real config loader, so pydantic can quote the
+    offending configuration verbatim - including a password. That diagnostic is
+    auto-expanded in the UI, which would bypass the Reveal controls.
+    """
+    from ai_manager.services.launcher_gate import redact_diagnostics
+
+    sentinel = "FAKEpw_SENTINEL"
+    raw = (
+        "Field required [type=missing, "
+        f"input_value={{'options': {{'password': {sentinel!r}}}}}, input_type=dict]"
+    )
+
+    cleaned = redact_diagnostics(raw)
+
+    assert sentinel not in cleaned
+    # The classification and field information must survive for diagnosis.
+    assert "Field required" in cleaned
+    assert "input_type=dict" in cleaned
+
+
+def test_redaction_covers_each_secret_option_key():
+    from ai_manager.services.launcher_gate import redact_diagnostics
+
+    for key in ("password", "account", "access_token", "api_key", "token"):
+        sentinel = f"SENTINEL_{key}"
+        cleaned = redact_diagnostics(f"bad value {{'{key}': '{sentinel}'}}")
+        assert sentinel not in cleaned, key
+
+
+def test_probe_result_detail_is_redacted(tmp_path):
+    """probe_launcher must redact whatever the launcher printed."""
+    from ai_manager.services.launcher_gate import probe_launcher
+
+    sentinel = "FAKEpw_SENTINEL"
+    script = tmp_path / "start.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        f"echo \"input_value={{'password': '{sentinel}'}}, input_type=dict\" >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+    result = probe_launcher(tmp_path)
+
+    assert result.passed is False
+    assert sentinel not in result.detail
+    assert sentinel not in result.stderr
+    assert sentinel not in result.stdout

@@ -21,6 +21,7 @@ the service. Its only interaction with the launcher is one captured
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -32,12 +33,49 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 TIMEOUT_S = 10.0
 
 
+#: Option keys whose values must never appear in diagnostics.
+_SECRET_KEYS = (
+    "password",
+    "account",
+    "access_token",
+    "api_key",
+    "token",
+    "secure_1psid",
+    "secure_1psidts",
+)
+_REDACTED = "***"
+
+#: An ``input_value={...}`` blob is how pydantic embeds the offending data.
+_INPUT_VALUE = re.compile(r"input_value=(\{.*?\}|\[.*?\]),?\s*input_type=", re.DOTALL)
+_SECRET_PAIR = re.compile(
+    r"(?P<key>['\"]?(?:" + "|".join(_SECRET_KEYS) + r")['\"]?\s*:\s*)"
+    r"(?P<quote>['\"])(?P<value>.*?)(?P=quote)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def redact_diagnostics(text: str) -> str:
+    """Strip credential-bearing values from service diagnostics.
+
+    The launcher runs the service's real configuration loader, so a validation
+    error can quote the offending configuration verbatim - including a password
+    or token held in an option value. Those diagnostics reach a details panel
+    that expands automatically, which would bypass the editor's Reveal controls.
+    Redact before the text is stored or displayed.
+    """
+    if not text:
+        return text
+    redacted = _INPUT_VALUE.sub("input_value=***, input_type=", text)
+    redacted = _SECRET_PAIR.sub(lambda m: f"{m.group('key')}{m.group('quote')}{_REDACTED}{m.group('quote')}", redacted)
+    return redacted
+
+
 def _parse_listener(stdout: str) -> tuple[str, int] | None:
     """Return ``(host, port)`` from the launcher's closing two lines.
 
     The launcher may print informational output before the answer - the real
-    chat2api launcher prints its version banner first - so the **last two**
-    non-empty lines are the answer, in order: the host, then the port. Any
+    chat2api launcher prints its version banner first - so the **last two** non-empty
+    lines are the answer, in order: the host, then the port. Any
     earlier output is ignored rather than treated as a parse error; cross-target
     acceptance against the real launcher is what established this.
 
@@ -83,7 +121,8 @@ def probe_launcher(app_dir: Path, *, timeout_s: float = TIMEOUT_S) -> LauncherPr
 
     Runs ``start.sh --print-listener`` with an argv list, ``shell=False``, the
     resolved application directory as cwd and the inherited environment. Success
-    requires exit status 0, exactly two non-empty stdout lines, a loopback host
+    requires exit status 0, at least two non-empty stdout lines (the last two are
+    the answer), a loopback host
     and a port in ``1..65535``. Every other outcome - non-zero exit, timeout,
     missing or unrunnable launcher, malformed answer - returns
     ``passed=False`` with the captured stderr as ``detail``.
@@ -117,8 +156,8 @@ def probe_launcher(app_dir: Path, *, timeout_s: float = TIMEOUT_S) -> LauncherPr
         timeout_message = (
             f"Launcher capability check timed out after {timeout_s:g} seconds."
         )
-        captured_stdout = _text(exc.stdout)
-        captured_stderr = _text(exc.stderr)
+        captured_stdout = redact_diagnostics(_text(exc.stdout))
+        captured_stderr = redact_diagnostics(_text(exc.stderr))
         detail = captured_stderr.strip() or timeout_message
         return LauncherProbeResult(
             passed=False,
@@ -134,19 +173,21 @@ def probe_launcher(app_dir: Path, *, timeout_s: float = TIMEOUT_S) -> LauncherPr
 
     parsed = _parse_listener(completed.stdout) if completed.returncode == 0 else None
     if parsed is None:
-        detail = (completed.stderr or completed.stdout or "").strip()
+        detail = redact_diagnostics(
+            (completed.stderr or completed.stdout or "").strip()
+        )
         return LauncherProbeResult(
             passed=False,
             detail=detail or "Launcher did not report a valid listener.",
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            stdout=redact_diagnostics(completed.stdout),
+            stderr=redact_diagnostics(completed.stderr),
             returncode=completed.returncode,
         )
     host, port = parsed
     return LauncherProbeResult(
         passed=True,
         detail=f"Launcher honors configuration: {host}:{port}",
-        stdout=completed.stdout,
-        stderr=completed.stderr,
+        stdout=redact_diagnostics(completed.stdout),
+        stderr=redact_diagnostics(completed.stderr),
         returncode=completed.returncode,
     )

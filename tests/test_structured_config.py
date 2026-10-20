@@ -528,3 +528,39 @@ def test_file_bridge_commit_preserves_comments_and_dispatches_by_kind(five_app_w
     assert b"# Local save destination" in path.read_bytes()
     assert path.read_bytes().index(b"save_root") < path.read_bytes().index(b"max_text_bytes") < path.read_bytes().index(b"port")
     assert result.document.mutations == ()
+
+
+@pytest.mark.parametrize("provider", [["echo"], {"a": 1}, 7, True])
+def test_non_string_provider_is_a_load_error(tmp_path, provider):
+    """A non-string provider must fail at load, not inside the widget.
+
+    The UI uses the provider as a combo-box key and a string. Letting a list or
+    mapping through raised TypeError during MainWindow construction, which is not
+    a ConfigLoadError and therefore escaped the load-error handler - one malformed
+    route could stop the manager from opening at all.
+    """
+    from ai_manager.config.config_errors import ConfigShapeError
+    from ai_manager.config.structured_config import load
+
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"server": {"port": 8123}, "models": {"m": {"provider": provider}}}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigShapeError) as excinfo:
+        load("chat2api", path)
+
+    assert "Provider for model 'm' must be a string" in str(excinfo.value)
+
+
+def test_string_provider_still_loads(tmp_path):
+    from ai_manager.config.structured_config import load
+
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps({"server": {"port": 8123}, "models": {"m": {"provider": "echo"}}}),
+        encoding="utf-8",
+    )
+
+    assert load("chat2api", path).existed is True

@@ -102,6 +102,15 @@ def _shape(kind: StructuredKind, path: Path, tree) -> None:
             raise ConfigShapeError(path, f"Model {name!r} must be a mapping; save is disabled.")
         if "options" in route and not isinstance(route["options"], dict):
             raise ConfigShapeError(path, f"Options for model {name!r} must be a mapping when present; save is disabled.")
+        # The service tolerates any provider value, but the editor uses it as a
+        # combo-box key and a string. A non-string provider must therefore fail
+        # at load with an explanation instead of raising inside the widget, which
+        # would escape the load-error handler and abort MainWindow construction.
+        if "provider" in route and not isinstance(route["provider"], str):
+            raise ConfigShapeError(
+                path,
+                f"Provider for model {name!r} must be a string; save is disabled.",
+            )
 
 
 def _parse_bytes(kind: StructuredKind, path: Path, raw: bytes):
