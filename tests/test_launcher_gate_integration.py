@@ -26,13 +26,26 @@ import pytest
 
 from ai_manager.services.launcher_gate import probe_launcher
 
-DEFAULT_CHECKOUT = (
-    "/data/home/henry-arch/.local/state/pi/project-manager/worktrees/"
-    "6f027a5a576a8d21/pm-run-20261017-160734-18a296e5/lane-b"
-)
-CHECKOUT = Path(os.environ.get("CHAT2API_LAUNCHER_CHECKOUT", DEFAULT_CHECKOUT))
+_CONFIGURED = os.environ.get("CHAT2API_LAUNCHER_CHECKOUT", "").strip()
+
+#: Absolute path to a chat2api checkout, or ``None`` when the operator has not
+#: supplied one. There is deliberately no default: acceptance must never depend on
+#: a machine-specific worktree path baked into the test source.
+CHECKOUT: Path | None = Path(_CONFIGURED) if _CONFIGURED else None
+
 BASELINE_COMMIT = "c40e3c6"
 PRODUCTION_PORT = 8000
+
+
+def _require_checkout() -> Path:
+    if CHECKOUT is None:
+        pytest.skip(
+            "CHAT2API_LAUNCHER_CHECKOUT is not set; cross-target acceptance requires "
+            "an explicit chat2api checkout"
+        )
+    if not (CHECKOUT / "app").is_dir():
+        pytest.skip(f"Target B checkout not available at {CHECKOUT}")
+    return CHECKOUT
 
 
 def _free_port() -> int:
@@ -50,7 +63,7 @@ def _listening(port: int) -> bool:
         return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
-def _virtualenv() -> Path | None:
+def _virtualenv(checkout: Path) -> Path | None:
     """Locate a virtualenv that can import the service's dependencies.
 
     Worktrees do not carry ``.venv`` (it is untracked), so fall back to the canonical
@@ -59,8 +72,8 @@ def _virtualenv() -> Path | None:
     import sys
 
     candidates = [
-        CHECKOUT / ".venv",
-        CHECKOUT / "venv",
+        checkout / ".venv",
+        checkout / "venv",
         Path("/data/home/guest/Development/ai/chat2api/.venv"),
         Path("/data/home/guest/Development/ai/chat2api/venv"),
         Path(sys.prefix),
@@ -77,8 +90,7 @@ def _sandbox(tmp_path: Path, launcher_text: str) -> tuple[Path, int]:
     ``start.sh`` does ``cd -- "$(dirname -- "$0")"``, so the launcher must live in the
     sandbox and the packages plus interpreter must resolve from there.
     """
-    if not (CHECKOUT / "app").is_dir():
-        pytest.skip(f"Target B checkout not available at {CHECKOUT}")
+    checkout = _require_checkout()
 
     root = tmp_path / "root"
     root.mkdir()
@@ -87,8 +99,8 @@ def _sandbox(tmp_path: Path, launcher_text: str) -> tuple[Path, int]:
     script.chmod(0o755)
 
     for package in ("app", "providers"):
-        (root / package).symlink_to(CHECKOUT / package, target_is_directory=True)
-    venv = _virtualenv()
+        (root / package).symlink_to(checkout / package, target_is_directory=True)
+    venv = _virtualenv(checkout)
     if venv is not None:
         (root / ".venv").symlink_to(venv, target_is_directory=True)
 
@@ -109,7 +121,7 @@ def _sandbox(tmp_path: Path, launcher_text: str) -> tuple[Path, int]:
 
 
 def _fixed_launcher() -> str:
-    launcher = CHECKOUT / "start.sh"
+    launcher = _require_checkout() / "start.sh"
     if not launcher.is_file():
         pytest.skip(f"no launcher at {launcher}")
     return launcher.read_text(encoding="utf-8")
@@ -118,7 +130,7 @@ def _fixed_launcher() -> str:
 def _baseline_launcher() -> str:
     try:
         completed = subprocess.run(
-            ["git", "-C", str(CHECKOUT), "show", f"{BASELINE_COMMIT}:start.sh"],
+            ["git", "-C", str(_require_checkout()), "show", f"{BASELINE_COMMIT}:start.sh"],
             capture_output=True,
             text=True,
             check=True,
