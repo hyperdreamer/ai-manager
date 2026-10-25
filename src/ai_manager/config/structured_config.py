@@ -396,7 +396,7 @@ def commit(
         sealed[target] = raw
         expected[target] = match.raw_sha256
         scalar_mutations.append(Mutation(("ai", "api_base"), "set", match.new_api_base))
-        dependent_baselines[match.meta.id] = _config_from_document(parsed)
+        dependent_baselines[match.meta.id] = _config_from_document(parsed, match.meta)
 
     # Stages 1-2 always run; stage 3 then re-reads only these sealed bytes.
     validate_written_scalars(tuple(scalar_mutations))

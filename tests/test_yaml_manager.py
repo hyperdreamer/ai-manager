@@ -2,18 +2,27 @@ import hashlib
 import os
 import shutil
 import stat
+from hashlib import sha256
 from pathlib import Path
 import pytest
 from ai_manager.config import yaml_manager
 from ai_manager.config.app_registry import get_managed_apps
-from ai_manager.config.config_errors import ConfigError, StaleDocumentError
+from ai_manager.config.config_errors import (
+    ConfigError,
+    ConfigLoadError,
+    ConfigShapeError,
+    StaleDocumentError,
+)
 from ai_manager.config.yaml_manager import (
+    _config_from_document,
     _get_yaml_engine,
     read_app_config,
+    read_app_config_snapshot,
     render_app_config,
     write_app_config,
 )
 from ai_manager.config.models import AppAIConfig, AppMetadata
+from tests.endpoint_helpers import meta_for
 
 
 @pytest.fixture
@@ -194,3 +203,163 @@ def test_pure_renderer_and_checked_writer(five_app_workspace, monkeypatch):
     assert list(path.parent.glob("config.yaml.*.bak")) and not (path.parent / "config.yaml.bak").exists()
     assert write_app_config(meta, cfg) is None
     assert (path.parent / "config.yaml.bak").exists()
+
+
+# --- Task 3: metadata-aware, non-creating snapshot reads ------------------
+
+
+@pytest.mark.parametrize("app", ["ai-grammar", "textkit", "yt2txt"])
+@pytest.mark.parametrize("line,value,raw", [
+    ("", None, None),
+    ("  endpoint: /v1/chat/completions\n", "/v1/chat/completions", None),
+    ("  endpoint: /v1/responses\n", "/v1/responses", None),
+    ("  endpoint: /v1/messages\n", "/v1/messages", None),
+    ("  endpoint: null\n", None, "None"),
+    ("  endpoint: ''\n", None, "''"),
+    ("  endpoint: /v1/completions\n", None, "'/v1/completions'"),
+    ("  endpoint: 42\n", None, "42"),
+    ("  endpoint: true\n", None, "True"),
+])
+def test_endpoint_read_matrix_with_metadata(tmp_path, app, line, value, raw):
+    meta = meta_for(tmp_path, app, selectable=app != "yt2txt")
+    (meta.relative_path / "config.yaml").write_text("ai:\n  model: m\n" + line)
+    config = read_app_config_snapshot(meta).config
+    assert (config.endpoint, config.endpoint_raw) == (
+        (value, raw) if app != "yt2txt" else (None, None)
+    )
+
+
+@pytest.mark.parametrize("base_line,present", [
+    (b"", False),
+    (b"  api_base: http://127.0.0.1:3000\n", True),
+    (b"  api_base: null\n", True),
+])
+def test_snapshot_hashes_the_same_bytes_it_parses(tmp_path, monkeypatch, base_line, present):
+    import ai_manager.config.structured_config as sc
+
+    meta = meta_for(tmp_path)
+    path = meta.relative_path / "config.yaml"
+    raw = b"# spelling matters\nai:\n" + base_line + b"  model: exact\n"
+    path.write_bytes(raw)
+    actual = sc._snapshot
+    calls = []
+
+    def once(p):
+        calls.append(p)
+        result = actual(p)
+        path.write_bytes(b"ai: {model: different}\n")
+        return result
+
+    monkeypatch.setattr(sc, "_snapshot", once)
+    snap = read_app_config_snapshot(meta)
+    assert snap.config.model == "exact" and snap.sha256 == sha256(raw).digest()
+    assert snap.api_base_present is present and len(calls) == 1
+
+
+@pytest.mark.parametrize("raw", [
+    b"[\n",
+    b"ai: {model: a, model: b}\n",
+    b"[]\n",
+    b"null\n",
+    b"false\n",
+    b"0\n",
+    b"ai: []\n",
+    b"ai: false\n",
+    b"\xff",
+])
+def test_load_failures_never_become_successful_default_snapshot(tmp_path, raw):
+    meta = meta_for(tmp_path)
+    path = meta.relative_path / "config.yaml"
+    path.write_bytes(raw)
+    with pytest.raises(ConfigLoadError) as error:
+        read_app_config_snapshot(meta)
+    assert error.value.path == path
+    assert path.read_bytes() == raw
+
+
+def test_snapshot_read_is_noncreating_and_regular_file_only(tmp_path):
+    meta = meta_for(tmp_path)
+    path = meta.relative_path / "config.yaml"
+    (path.parent / "config.example.yaml").write_text("ai: {model: example}\n")
+    with pytest.raises(ConfigLoadError, match="Configuration file is missing"):
+        read_app_config_snapshot(meta)
+    assert not path.exists()
+    path.symlink_to(path.parent / "config.example.yaml")
+    with pytest.raises(ConfigLoadError):
+        read_app_config_snapshot(meta)
+    path.unlink()
+    os.mkfifo(path)
+    with pytest.raises(ConfigLoadError):
+        read_app_config_snapshot(meta)
+    path.unlink()
+    for raw in (b"", b"# comments only\n", b"ai: null\n"):
+        path.write_bytes(raw)
+        path.chmod(0o444)
+        assert read_app_config_snapshot(meta).sha256 == sha256(raw).digest()
+        path.chmod(0o600)
+
+
+@pytest.mark.parametrize("raw,message,reason", [
+    (b"[]\n", "Configuration root must be a mapping; save is disabled.", "non-dict-root"),
+    (b"null\n", "Configuration root must be a mapping; save is disabled.", "non-dict-root"),
+    (b"false\n", "Configuration root must be a mapping; save is disabled.", "non-dict-root"),
+    (b"ai: []\n", "AI must be a mapping when present; save is disabled.", "load-error"),
+    (b"ai: false\n", "AI must be a mapping when present; save is disabled.", "load-error"),
+])
+def test_shape_errors_use_exact_messages_and_reasons(tmp_path, raw, message, reason):
+    meta = meta_for(tmp_path)
+    path = meta.relative_path / "config.yaml"
+    path.write_bytes(raw)
+    with pytest.raises(ConfigShapeError) as error:
+        read_app_config_snapshot(meta)
+    assert error.value.detail == message
+    assert error.value.reason == reason
+    assert error.value.path == path
+
+
+def test_direct_helper_shape_errors_and_empty_mapping(tmp_path):
+    meta = meta_for(tmp_path)
+    with pytest.raises(ValueError, match=r"^Configuration root must be a mapping; save is disabled\.$"):
+        _config_from_document([], meta)
+    with pytest.raises(ValueError, match=r"^AI must be a mapping when present; save is disabled\.$"):
+        _config_from_document({"ai": []}, meta)
+    assert _config_from_document({}, meta) == AppAIConfig()
+
+
+def test_reader_split_classification_uses_metadata(tmp_path):
+    tree = {"ai": {"model": "inactive", "ocr": {"api_key_env": "VISION_KEY"}}}
+    grammar = _config_from_document(tree, meta_for(tmp_path))
+    text = _config_from_document(tree, meta_for(tmp_path, "textkit"))
+    assert not grammar.is_split_model and grammar.model == "inactive"
+    assert text.is_split_model and text.model is None and text.ocr_model is None
+
+
+def test_render_remains_pure(tmp_path):
+    meta = meta_for(tmp_path)
+    path = meta.relative_path / "config.yaml"
+    original = b"ai:\n  model: 'old' # keep\n"
+    path.write_bytes(original)
+    tree = _get_yaml_engine().load(original.decode())
+    seen = []
+
+    def mutate(candidate):
+        seen.append(candidate)
+        candidate["ai"]["model"] = "new"
+
+    rendered = render_app_config(meta, tree, mutate)
+    assert len(seen) == 1 and seen[0] is not tree
+    assert tree["ai"]["model"] == "old" and path.read_bytes() == original
+    assert b"'new' # keep" in rendered
+
+
+def test_compatibility_reader_creates_from_example_then_returns_owned_copy(tmp_path):
+    meta = meta_for(tmp_path)
+    path = meta.relative_path / "config.yaml"
+    (path.parent / "config.example.yaml").write_text(
+        "ai:\n  api_base: http://127.0.0.1:9100\n  model: 'example'\n"
+    )
+    first = read_app_config(meta)
+    assert path.exists() and first.api_base == "http://127.0.0.1:9100"
+    first.model = "mutated"
+    assert read_app_config(meta).model == "example"
+    assert yaml_manager.read_app_config(meta).model == "example"

@@ -267,3 +267,48 @@ def test_dependent_bytes_are_sealed_before_stage_three(five_app_workspace, monke
         assert match.path.read_bytes() == match.raw_bytes.replace(b":8000", b":8123")
         assert b"9999" not in match.path.read_bytes()
     assert set(result.saved_dependents) == {"ai-grammar", "textkit", "yt2txt"}
+
+
+# --- Task 3: dependent reads pass metadata, not shape-inferred ownership ----
+
+
+def _write_dependent(path: Path, endpoint_line: str = "") -> None:
+    path.write_text(
+        "ai:\n"
+        '  api_base: "http://127.0.0.1:8000"\n'
+        '  api_key: "$CHAT2API_TOKEN"\n'
+        '  model: "dependent-model"\n' + endpoint_line,
+        encoding="utf-8",
+    )
+
+
+def test_dependent_inspection_normalizes_endpoint_with_metadata(five_app_workspace):
+    apps, before, after = drafts(five_app_workspace)
+    _write_dependent(apps["ai-grammar"].relative_path / "config.yaml", "  endpoint: /v1/messages\n")
+    _write_dependent(apps["textkit"].relative_path / "config.yaml", "  endpoint: /v1/completions\n")
+    _write_dependent(apps["yt2txt"].relative_path / "config.yaml", "  endpoint: /v1/messages\n")
+    matches = find_affected_dependents(apps, before, after)
+    assert [m.meta.id for m in matches] == ["ai-grammar", "textkit", "yt2txt"]
+    grammar, text, youtube = (m.saved_config for m in matches)
+    assert (grammar.endpoint, grammar.endpoint_raw) == ("/v1/messages", None)
+    assert (text.endpoint, text.endpoint_raw) == (None, "'/v1/completions'")
+    assert (youtube.endpoint, youtube.endpoint_raw) == (None, None)
+
+
+def test_dependent_commit_normalizes_with_dependent_metadata(five_app_workspace, monkeypatch):
+    from ai_manager.config import structured_config as sc
+    from ai_manager.config.structured_models import ValidationResult
+    import ai_manager.services.service_validation as service
+
+    monkeypatch.setattr(service, "validate_candidate", lambda *a: ValidationResult("service", "fixture valid"))
+    apps, before, after = drafts(five_app_workspace)
+    grammar_path = apps["ai-grammar"].relative_path / "config.yaml"
+    youtube_path = apps["yt2txt"].relative_path / "config.yaml"
+    _write_dependent(grammar_path, "  endpoint: /v1/messages\n")
+    _write_dependent(youtube_path, "  endpoint: /hand-written/value\n")
+    matches = find_affected_dependents(apps, before, after)
+    result = sc.commit("chat2api", before.path, after, before.raw_sha256, dependents=matches)
+    assert result.saved_dependents["ai-grammar"].endpoint == "/v1/messages"
+    assert (result.saved_dependents["yt2txt"].endpoint, result.saved_dependents["yt2txt"].endpoint_raw) == (None, None)
+    assert b"  endpoint: /v1/messages\n" in grammar_path.read_bytes()
+    assert b"  endpoint: /hand-written/value\n" in youtube_path.read_bytes()
