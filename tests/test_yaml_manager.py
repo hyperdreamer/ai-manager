@@ -14,6 +14,7 @@ from ai_manager.config.config_errors import (
     ConfigLoadError,
     ConfigShapeError,
     StaleDocumentError,
+    TransactionError,
 )
 from ai_manager.config.yaml_manager import (
     _apply_ai_config,
@@ -830,3 +831,45 @@ def test_legacy_temp_collision_preserves_unowned_file(tmp_path, monkeypatch):
         write_app_config(meta, draft, baseline=saved.config)
     assert collision.exists() and collision.read_bytes() == b"unowned temporary file"
     assert isinstance(caught.value.__cause__, FileExistsError) and path.read_bytes() == before
+
+
+def test_checked_writer_preserves_primary_unknown_error_after_cleanup_failure(tmp_path, monkeypatch):
+    meta = meta_for(tmp_path)
+    path = meta.relative_path / "config.yaml"
+    before = b"ai: {model: old}\n"
+    path.write_bytes(before)
+    saved = read_app_config_snapshot(meta)
+    candidate = AppAIConfig.model_validate({**saved.config.model_dump(), "model": "pending"})
+    original_replace, original_release, original_sync = (
+        Transaction.replace_all, Transaction._release, Transaction._fsync_dir
+    )
+    primary = []
+
+    def replace(tx):
+        try:
+            return original_replace(tx)
+        except TransactionError as exc:
+            primary.append(exc)
+            raise
+
+    def sync(tx, parent):
+        if tx._state in ("replacing", "rolling-back"):
+            raise OSError("replace/restore fsync fixture")
+        return original_sync(tx, parent)
+
+    def release(tx):
+        original_release(tx)
+        raise OSError("cleanup fixture")
+
+    monkeypatch.setattr(Transaction, "replace_all", replace)
+    monkeypatch.setattr(Transaction, "_fsync_dir", sync)
+    monkeypatch.setattr(Transaction, "_release", release)
+    with pytest.raises(ConfigError) as caught:
+        write_app_config(meta, candidate, baseline=saved.config, expected_sha256=saved.sha256)
+    assert len(primary) == 1 and caught.value is primary[0]
+    assert caught.value.report.files == {path: "unknown"}
+    assert caught.value.report.phase == "rollback" and not caught.value.report.committed
+    assert isinstance(caught.value.__cause__, OSError) and str(caught.value.__cause__) == "cleanup fixture"
+    assert path.read_bytes() == before
+    assert caught.value.report.backups[path].read_bytes() == before
+    assert not list(path.parent.glob(".*.tmp"))

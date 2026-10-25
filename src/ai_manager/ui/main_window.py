@@ -1,6 +1,6 @@
 import copy
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Dict, Optional
@@ -27,6 +27,7 @@ from ai_manager.config.blast_radius import (
     urls_match,
 )
 from ai_manager.config.config_errors import (
+    CommittedWriteError,
     ConfigError,
     ConfigLoadError,
     ConfigValidationError,
@@ -49,6 +50,12 @@ from ai_manager.config.models import (
     ThemeMode,
     UserSettings,
 )
+from ai_manager.config.protocols import (
+    base_conflicts_with_endpoint,
+    compose_request_url,
+    effective_api_base,
+    is_valid_endpoint,
+)
 from ai_manager.config.structured_config import _candidate, load as load_structured, render
 from ai_manager.config.structured_models import LauncherProbeResult, SaveResult, StructuredDoc
 from ai_manager.config.structured_schema import validate_in_process
@@ -67,7 +74,9 @@ from ai_manager.services.desktop_integration import DesktopIntegrationService
 from ai_manager.services.model_fetcher import ModelFetchWorker
 from ai_manager.services.protocol_capability import (
     ProtocolSupport,
+    ProtocolSupportStatus,
     invalidate_protocol_support,
+    probe_protocol_support,
     protocol_support_generation,
 )
 from ai_manager.services.supervisor import SupervisorManager
@@ -90,6 +99,18 @@ from ai_manager.utils.path_locator import find_ai_workspace_root
 PAYLOAD_KIND_MISMATCH = (
     "Configuration draft does not match this app's config kind; save refused."
 )
+
+
+@dataclass(frozen=True)
+class LLMGateResult:
+    refused: bool = False
+    no_op: bool = False
+    message: str = ""
+    detail: str = ""
+
+    def __post_init__(self) -> None:
+        if self.refused and self.no_op:
+            raise ValueError("A refused save cannot be a no-op.")
 
 
 def get_settings_file_path() -> Path:
@@ -467,6 +488,73 @@ class MainWindow(QMainWindow):
         self._set_dirty_indicator(app_id)
         self._update_auth_warnings()
 
+    def _evaluate_llm_gate(
+        self, app_id: str, draft: AppAIConfig, saved: AppAIConfig | None
+    ) -> LLMGateResult:
+        snap = self._snapshots.get(app_id)
+
+        def refuse(message: str, detail: str = "") -> LLMGateResult:
+            return LLMGateResult(refused=True, message=message, detail=detail)
+
+        if self._load_failed.get(app_id, False) or snap is None or saved is None:
+            return refuse("Reload the configuration before saving.")
+        conflicts = self._baseline_conflict.get(app_id, ())
+        if conflicts:
+            return refuse(
+                "Configuration changed while you were editing. Reload the configuration before saving.",
+                "Conflicting fields: " + ", ".join(conflicts) + ".",
+            )
+        if draft.endpoint is not None and not is_valid_endpoint(draft.endpoint):
+            return refuse(
+                f"Unsupported protocol value: {draft.endpoint!r}. Pick one of the three supported protocols or Auto."
+            )
+        if draft.endpoint_raw is not None:
+            return refuse(
+                "Not one of the three supported protocols. Pick a valid one, or Auto to remove the key.",
+                f"Stored ai.endpoint: {draft.endpoint_raw}",
+            )
+        canonical = AppAIConfig.model_validate(draft.model_dump())
+        saved = snap.config
+        base = effective_api_base(app_id, canonical, snap)
+        if canonical.endpoint is not None and base_conflicts_with_endpoint(base, canonical.endpoint):
+            return refuse(
+                "The protocol path already includes /v1. Enter the gateway prefix, e.g. https://api.openai.com.",
+                "Request URL: " + compose_request_url(app_id, base, canonical.endpoint),
+            )
+        if canonical == saved:
+            return LLMGateResult(no_op=True)
+        if canonical.endpoint is None and saved.endpoint is not None:
+            return LLMGateResult()
+        if canonical.endpoint == saved.endpoint:
+            return LLMGateResult()
+        meta = self.apps[app_id]
+        if not meta.supports_protocol_selection:
+            return refuse("Protocol selection is not available for this application.")
+        support = probe_protocol_support(meta)
+        self._protocol_support[app_id] = support
+        self.views[app_id].set_protocol_support(support)
+        if canonical.endpoint in support.accepted:
+            return LLMGateResult()
+        if support.status is not ProtocolSupportStatus.UNVERIFIABLE:
+            return refuse(
+                f"Installed build rejected protocol {canonical.endpoint}. Update the service or select Auto.",
+                support.detail,
+            )
+        return refuse(
+            "Cannot verify this build; introducing or changing ai.endpoint is refused. Select Auto to remove the key, or restore the saved protocol.",
+            support.detail,
+        )
+
+    def _committed_llm_snapshot(
+        self, prepared: ConfigSnapshot, digest: bytes
+    ) -> ConfigSnapshot:
+        if type(digest) is not bytes or len(digest) != 32:
+            raise ValueError("Snapshot digest must be a 32-byte SHA-256 value.")
+        # All deep ownership was prepared before the writer's commit point.
+        snapshot = copy.copy(prepared)
+        object.__setattr__(snapshot, "sha256", digest)
+        return snapshot
+
     def _on_save_requested(self, app_id: str, config: object, should_restart: bool) -> None:
         if app_id in self._save_jobs:
             return
@@ -476,28 +564,56 @@ class MainWindow(QMainWindow):
             if meta.config_kind == "llm":
                 if not isinstance(config, AppAIConfig):
                     raise ConfigError(PAYLOAD_KIND_MISMATCH)
-                old = self._snapshots.get(app_id)
-                if old is None:
-                    raise ConfigError("Reload the configuration before saving.")
-                canonical = AppAIConfig.model_validate(config.model_dump())
-                saved = canonical.model_copy(deep=True)
-                draft = canonical.model_copy(deep=True)
-                digest = write_app_config(
-                    meta, canonical, baseline=old.config, expected_sha256=old.sha256
+                snap = self._snapshots.get(app_id)
+                result = self._evaluate_llm_gate(
+                    app_id, config, self._saved_configs.get(app_id)
                 )
-                snapshot = ConfigSnapshot(
-                    canonical, digest, old.api_base_present or canonical.api_base != old.config.api_base
-                )
+                if result.refused:
+                    view.show_config_error(result.message, result.detail)
+                    return
+                if result.no_op:
+                    if should_restart:
+                        self._request_saved_restart(app_id)
+                    else:
+                        view.show_config_error("Configuration saved.")
+                    return
+                candidate = AppAIConfig.model_validate(config.model_dump())
+                saved_copy = candidate.model_copy(deep=True)
+                draft_copy = candidate.model_copy(deep=True)
+                present = snap.api_base_present or candidate.api_base != snap.config.api_base
+                prepared = ConfigSnapshot(candidate, snap.sha256, present)
+                committed_error = None
+                try:
+                    installed = write_app_config(
+                        meta, candidate, baseline=snap.config, expected_sha256=snap.sha256
+                    )
+                except CommittedWriteError as exc:
+                    installed, committed_error = exc.installed_sha256, exc
+                snapshot = self._committed_llm_snapshot(prepared, installed)
+                self._snapshots[app_id] = snapshot
+                self._saved_configs[app_id] = saved_copy
+                self._draft_configs[app_id] = draft_copy
+                if committed_error is not None:
+                    self._load_failed[app_id] = True
+                    view.set_recovery_state(
+                        load_failed=True, conflicts=self._baseline_conflict.get(app_id, ()),
+                        message="Configuration saved, but the file must be reloaded before another save.",
+                        detail=str(committed_error.cause),
+                    )
+                    self._set_dirty_indicator(app_id)
+                    return
                 try:
                     view.load_config(snapshot)
+                    self._set_dirty_indicator(app_id)
+                    self._update_auth_warnings()
                 except Exception as exc:
-                    self._show_llm_load_error(app_id, exc)
+                    self._load_failed[app_id] = True
+                    view.set_recovery_state(
+                        load_failed=True, conflicts=self._baseline_conflict.get(app_id, ()),
+                        message="Configuration saved, but the file must be reloaded before another save.",
+                        detail=str(exc),
+                    )
                     return
-                self._snapshots[app_id] = snapshot
-                self._saved_configs[app_id] = saved
-                self._draft_configs[app_id] = draft
-                self._set_dirty_indicator(app_id)
-                self._update_auth_warnings()
                 if should_restart:
                     self._request_saved_restart(app_id)
                 else:
@@ -771,6 +887,26 @@ class MainWindow(QMainWindow):
         self._pending_restarts.pop(app_id, None)
         self._save_jobs.pop(app_id, None)
         view = self.views[app_id]
+        if self.apps[app_id].config_kind == "llm":
+            if isinstance(error, StaleDocumentError):
+                self._load_failed[app_id] = True
+                view.set_recovery_state(
+                    load_failed=True, conflicts=self._baseline_conflict.get(app_id, ()),
+                    message="Configuration changed on disk; save refused. Reload the configuration before saving.",
+                )
+            elif isinstance(error, TransactionError):
+                if any(state == "unknown" for state in error.report.files.values()):
+                    self._load_failed[app_id] = True
+                    view.set_recovery_state(
+                        load_failed=True, conflicts=self._baseline_conflict.get(app_id, ()),
+                        message=str(error),
+                    )
+                else:
+                    view.show_config_error(str(error))
+                TransactionReportDialog(error.report, self).exec()
+            else:
+                view.show_config_error(str(error))
+            return
         view.set_save_in_progress(False)
         self._set_dirty_indicator(app_id)
         if isinstance(error, ConfigValidationError) and isinstance(

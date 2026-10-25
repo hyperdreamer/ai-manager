@@ -536,3 +536,40 @@ def test_cleanup_preserves_primary_unknown_report(tmp_path, monkeypatch):
     assert caught.value is primary and caught.value.report is report
     assert isinstance(caught.value.__cause__, OSError)
     assert tx._state == "closed" and tx._locks == []
+
+
+def test_actual_replace_unknown_report_survives_cleanup_failure(tmp_path, monkeypatch):
+    path = files(tmp_path, 1)[0]
+    before = path.read_bytes()
+    original_release, original_sync = tm.Transaction._release, tm.Transaction._fsync_dir
+    primary = None
+
+    def sync(tx, parent):
+        if tx._state in ("replacing", "rolling-back"):
+            raise OSError("replace/restore fsync fixture")
+        return original_sync(tx, parent)
+
+    def release(tx):
+        original_release(tx)
+        raise OSError("cleanup fixture")
+
+    monkeypatch.setattr(tm.Transaction, "_fsync_dir", sync)
+    monkeypatch.setattr(tm.Transaction, "_release", release)
+    with pytest.raises(Exception) as caught:
+        with tm.Transaction() as tx:
+            tx.prepare([path], {path: digest(path)})
+            tx.backups()
+            tx.stage({path: b"candidate\n"})
+            try:
+                tx.replace_all()
+            except TransactionError as exc:
+                primary = exc
+                raise
+    assert isinstance(primary, TransactionError) and caught.value is primary
+    assert primary.report.files == {path: "unknown"} and not primary.report.committed
+    assert primary.report.backups[path].read_bytes() == before
+    assert isinstance(primary.__cause__, OSError) and str(primary.__cause__) == "cleanup fixture"
+    assert tx._state == "closed" and tx._locks == [] and not tx._entered
+    assert path.read_bytes() == before and not list(tmp_path.glob(".*.tmp"))
+    with open(str(path) + ".lock", "r+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

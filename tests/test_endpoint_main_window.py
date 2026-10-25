@@ -1,13 +1,25 @@
-"""Snapshot presentation and initial LLM ownership (save gate follows in Task 9)."""
+"""LLM snapshot ownership, protocol delivery, and the checked save seam."""
+import copy
+import stat
+from dataclasses import FrozenInstanceError
 from hashlib import sha256
 from unittest.mock import Mock
 
 import pytest
-from PyQt6.QtCore import QProcess, QThread, QThreadPool
+from PyQt6.QtCore import QEvent, QProcess, QThread, QThreadPool, Qt
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from ai_manager.config.app_registry import get_managed_apps
-from ai_manager.config.models import AppAIConfig
+from ai_manager.config import transaction as transaction_module, yaml_manager
+from ai_manager.config.config_errors import (
+    CommittedWriteError,
+    ConfigError,
+    StaleDocumentError,
+    TransactionError,
+)
+from ai_manager.config.models import AppAIConfig, ConfigSnapshot
+from ai_manager.config.structured_models import TransactionReport
+from ai_manager.config.transaction import Transaction
 from ai_manager.config.protocols import ENDPOINT_VALUES
 from ai_manager.services import config_jobs as jobs
 from ai_manager.services import protocol_capability as capability
@@ -15,6 +27,12 @@ from ai_manager.services.protocol_capability import ProtocolSupport, ProtocolSup
 from ai_manager.config.yaml_manager import read_app_config_snapshot
 from ai_manager.ui.app_detail_view import AppDetailView
 from ai_manager.ui import main_window as mw
+
+
+@pytest.fixture(autouse=True)
+def finish_prior_widget_deletions(qapp):
+    """Complete pytest-qt's deferred teardown before creating another five-app window."""
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 def broken_read(root, monkeypatch):
@@ -591,3 +609,580 @@ def test_failed_to_start_clears_saved_pending_and_reprobes_exactly_once(
     assert capability.protocol_support_generation(app_id) == generation + 1
     assert len(protocol_pool.jobs) == 1
     assert window.views[app_id].get_current_draft() == window._draft_configs[app_id] == before
+
+
+def install_saved(window, app_id, config, *, present=True, digest=b"b" * 32):
+    snapshot = ConfigSnapshot(config, digest, present)
+    window._snapshots[app_id] = snapshot
+    window._saved_configs[app_id] = config.model_copy(deep=True)
+    window._draft_configs[app_id] = config.model_copy(deep=True)
+    window._load_failed[app_id] = False
+    window._baseline_conflict[app_id] = ()
+    window.views[app_id].load_config(snapshot)
+    window.views[app_id].set_recovery_state(load_failed=False)
+    return snapshot
+
+
+def stage_draft(window, app_id, candidate):
+    window.views[app_id]._display_draft(candidate)
+    window._on_config_changed(app_id, candidate)
+
+
+def owned_state(window, app_id="ai-grammar"):
+    references = tuple(store.get(app_id) for store in (
+        window._snapshots, window._saved_configs, window._draft_configs
+    ))
+    return references, copy.deepcopy(references)
+
+
+def assert_owned_state(window, before, app_id="ai-grammar"):
+    references, values = before
+    current = tuple(store.get(app_id) for store in (
+        window._snapshots, window._saved_configs, window._draft_configs
+    ))
+    assert all(now is previous for now, previous in zip(current, references))
+    assert current == values
+
+
+def test_gate_result_cannot_be_refused_and_no_op():
+    with pytest.raises(ValueError):
+        mw.LLMGateResult(refused=True, no_op=True)
+    with pytest.raises(FrozenInstanceError):
+        mw.LLMGateResult().no_op = True
+
+
+def test_real_save_slot_obeys_gate_refusal(endpoint_window, monkeypatch):
+    window = endpoint_window
+    refused = mw.LLMGateResult(refused=True, message="fixture refusal", detail="<plain>")
+    gate = Mock(return_value=refused)
+    writer = Mock(side_effect=AssertionError("refused write"))
+    monkeypatch.setattr(window, "_evaluate_llm_gate", gate)
+    monkeypatch.setattr(mw, "write_app_config", writer)
+    before = window._snapshots["ai-grammar"]
+    draft = window.views["ai-grammar"].get_current_draft()
+    window._on_save_requested("ai-grammar", draft, True)
+    assert window.views["ai-grammar"]._config_error_label.text() == "fixture refusal"
+    assert window.views["ai-grammar"]._config_error_details.toPlainText() == "<plain>"
+    gate.assert_called_once_with("ai-grammar", draft, before.config)
+    writer.assert_not_called()
+    window.supervisor_manager.restart_service.assert_not_called()
+    assert window._snapshots["ai-grammar"] is before
+
+
+@pytest.mark.parametrize("case,message,detail", [
+    ("missing_snapshot", "Reload the configuration before saving.", ""),
+    ("failed_load", "Reload the configuration before saving.", ""),
+    ("missing_saved", "Reload the configuration before saving.", ""),
+    ("conflict", "Configuration changed while you were editing. Reload the configuration before saving.",
+     "Conflicting fields: api_base, endpoint."),
+    ("invalid_literal", "Unsupported protocol value: '/bad'. Pick one of the three supported protocols or Auto.", ""),
+    ("raw_before_base", "Not one of the three supported protocols. Pick a valid one, or Auto to remove the key.",
+     "Stored ai.endpoint: '<bad & raw>'"),
+    ("raw_equal", "Not one of the three supported protocols. Pick a valid one, or Auto to remove the key.",
+     "Stored ai.endpoint: '<bad & raw>'"),
+    ("base_equal", "The protocol path already includes /v1. Enter the gateway prefix, e.g. https://api.openai.com.",
+     "Request URL: https://x/v1/v1/messages"),
+    ("base_changed", "The protocol path already includes /v1. Enter the gateway prefix, e.g. https://api.openai.com.",
+     "Request URL: https://x/v1/v1/messages"),
+    ("metadata_false", "Protocol selection is not available for this application.", ""),
+])
+def test_ordered_gate_refusals_retain_pending_state(endpoint_window, monkeypatch, case, message, detail):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    baseline = AppAIConfig(api_base="https://x", model="old")
+    if case in ("base_equal", "base_changed"):
+        baseline.endpoint = "/v1/messages"
+    if case == "base_equal":
+        baseline.api_base = "https://x/v1/"
+    if case == "raw_equal":
+        baseline.endpoint_raw = "'<bad & raw>'"
+    old = install_saved(window, app_id, baseline)
+    candidate = baseline.model_copy(deep=True)
+    if case not in ("raw_equal", "base_equal"):
+        candidate.model = "pending"
+    if case in ("raw_before_base", "base_changed"):
+        candidate.api_base = "https://x/v1/"
+        candidate.endpoint = "/v1/messages"
+    if case == "raw_before_base":
+        candidate.endpoint_raw = "'<bad & raw>'"
+    if case == "metadata_false":
+        window.apps[app_id].supports_protocol_selection = False
+        candidate.endpoint = "/v1/messages"
+    # Forge bad base shape too: the literal guard must win over revalidation.
+    if case in ("missing_snapshot", "failed_load", "missing_saved", "conflict", "invalid_literal"):
+        candidate = AppAIConfig.model_construct(api_base=123, endpoint="/bad", model="pending")
+        # This forged payload enters at the save boundary, bypassing widget validation.
+        window._draft_configs[app_id] = candidate.model_copy(deep=True)
+    elif case == "metadata_false":
+        window._on_config_changed(app_id, candidate)
+    else:
+        stage_draft(window, app_id, candidate)
+    if case == "missing_snapshot":
+        window._snapshots.pop(app_id)
+    elif case == "failed_load":
+        window._load_failed[app_id] = True
+    elif case == "missing_saved":
+        window._saved_configs.pop(app_id)
+    if case in ("missing_snapshot", "failed_load", "missing_saved", "conflict"):
+        window._baseline_conflict[app_id] = ("api_base", "endpoint")
+    before = owned_state(window)
+    widgets_before = window.views[app_id].get_current_draft()
+    path = window.apps[app_id].relative_path / "config.yaml"
+    raw = path.read_bytes()
+    writer = Mock(side_effect=AssertionError("refusal reached writer"))
+    probe = Mock(side_effect=AssertionError("early guard reached probe"))
+    monkeypatch.setattr(mw, "write_app_config", writer)
+    monkeypatch.setattr(mw, "probe_protocol_support", probe)
+    support_before = window._protocol_support[app_id]
+    window._on_save_requested(app_id, candidate, True)
+    view = window.views[app_id]
+    assert view._config_error_label.text() == message
+    assert view._config_error_details.toPlainText() == detail
+    assert view._config_error_label.textFormat() is Qt.TextFormat.PlainText
+    assert_owned_state(window, before)
+    assert view.get_current_draft() == widgets_before
+    assert window._protocol_support[app_id] is support_before
+    assert path.read_bytes() == raw
+    assert not list(path.parent.glob("*.bak"))
+    writer.assert_not_called()
+    probe.assert_not_called()
+    window.supervisor_manager.restart_service.assert_not_called()
+    assert old.sha256 == b"b" * 32
+
+
+@pytest.mark.parametrize("guard", ["load", "conflict"])
+@pytest.mark.parametrize("should_restart", [False, True])
+def test_equal_draft_still_obeys_recovery_guards(endpoint_window, monkeypatch, guard, should_restart):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    old = window._snapshots[app_id]
+    window._load_failed[app_id] = guard == "load"
+    window._baseline_conflict[app_id] = ("endpoint",) if guard == "conflict" else ()
+    writer = Mock(side_effect=AssertionError("blocked equality wrote"))
+    probe = Mock(side_effect=AssertionError("blocked equality probed"))
+    monkeypatch.setattr(mw, "write_app_config", writer)
+    monkeypatch.setattr(mw, "probe_protocol_support", probe)
+    window._on_save_requested(app_id, old.config, should_restart)
+    assert window.views[app_id]._config_error_label.text() == (
+        "Reload the configuration before saving." if guard == "load" else
+        "Configuration changed while you were editing. Reload the configuration before saving."
+    )
+    assert window._snapshots[app_id] is old
+    writer.assert_not_called()
+    probe.assert_not_called()
+    window.supervisor_manager.restart_service.assert_not_called()
+
+
+@pytest.mark.parametrize("status", [ProtocolSupportStatus.UNSUPPORTED, ProtocolSupportStatus.UNVERIFIABLE])
+@pytest.mark.parametrize("removal", [True, False])
+def test_removal_and_unchanged_skip_probe(endpoint_window, monkeypatch, status, removal):
+    window = endpoint_window
+    old = install_saved(window, "ai-grammar", AppAIConfig(api_base="https://x", endpoint="/v1/messages"))
+    forbidden = Mock(side_effect=AssertionError("preserved/removed endpoint probed"))
+    monkeypatch.setattr(mw, "probe_protocol_support", forbidden)
+    window._protocol_support["ai-grammar"] = ProtocolSupport(status, frozenset(), "unknown detail")
+    candidate = AppAIConfig.model_validate({**old.config.model_dump(), "model": "pending",
+                                           "endpoint": None if removal else old.config.endpoint})
+    stage_draft(window, "ai-grammar", candidate)
+    writer = Mock(return_value=b"n" * 32)
+    monkeypatch.setattr(mw, "write_app_config", writer)
+    window._on_save_requested("ai-grammar", candidate, False)
+    writer.assert_called_once_with(window.apps["ai-grammar"], candidate,
+                                   baseline=old.config, expected_sha256=old.sha256)
+    assert window._snapshots["ai-grammar"].sha256 == b"n" * 32
+    assert window._saved_configs["ai-grammar"] == candidate
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("status,endpoint,old_endpoint,allowed", [
+    (ProtocolSupportStatus.SUPPORTED, "/v1/responses", None, True),
+    (ProtocolSupportStatus.PARTIAL, "/v1/messages", None, True),
+    (ProtocolSupportStatus.PARTIAL, "/v1/responses", "/v1/messages", False),
+    (ProtocolSupportStatus.UNSUPPORTED, "/v1/messages", None, False),
+    (ProtocolSupportStatus.UNVERIFIABLE, "/v1/messages", None, False),
+    (ProtocolSupportStatus.UNVERIFIABLE, "/v1/responses", "/v1/messages", False),
+])
+def test_changed_endpoint_uses_fresh_acceptance(endpoint_window, monkeypatch, status, endpoint, old_endpoint, allowed):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    old = install_saved(window, app_id, AppAIConfig(api_base="https://x", endpoint=old_endpoint))
+    candidate = AppAIConfig.model_validate({**old.config.model_dump(), "endpoint": endpoint, "model": "pending"})
+    stage_draft(window, app_id, candidate)
+    before = owned_state(window)
+    accepted = ENDPOINT_VALUES if status is ProtocolSupportStatus.SUPPORTED else (
+        frozenset({"/v1/messages"}) if status is ProtocolSupportStatus.PARTIAL else frozenset()
+    )
+    fresh = ProtocolSupport(status, accepted, "<probe> api_key='fresh-secret'")
+    # The displayed result deliberately disagrees with the keyed lookup.
+    window._protocol_support[app_id] = (
+        ProtocolSupport(ProtocolSupportStatus.UNSUPPORTED) if allowed else supported()
+    )
+    probe = Mock(return_value=fresh)
+    writer = Mock(return_value=b"n" * 32, side_effect=None if allowed else AssertionError("rejected write"))
+    monkeypatch.setattr(mw, "probe_protocol_support", probe)
+    monkeypatch.setattr(mw, "write_app_config", writer)
+    window._on_save_requested(app_id, candidate, False)
+    view = window.views[app_id]
+    if allowed:
+        assert window._snapshots[app_id].config == candidate
+        assert window._snapshots[app_id].sha256 == b"n" * 32
+        writer.assert_called_once_with(window.apps[app_id], candidate,
+                                       baseline=old.config, expected_sha256=old.sha256)
+    else:
+        assert view._config_error_label.text() == (
+            "Cannot verify this build; introducing or changing ai.endpoint is refused. Select Auto to remove the key, or restore the saved protocol."
+            if status is ProtocolSupportStatus.UNVERIFIABLE else
+            f"Installed build rejected protocol {endpoint}. Update the service or select Auto."
+        )
+        assert_owned_state(window, before)
+        assert view.get_current_draft() == candidate
+        assert view._protocol_combo.currentData() == endpoint
+        writer.assert_not_called()
+    probe.assert_called_once_with(window.apps[app_id])
+    assert window._protocol_support[app_id] is fresh and view._protocol_support is fresh
+    if status is ProtocolSupportStatus.SUPPORTED:
+        assert view._config_error_details.toPlainText() == ""
+    else:
+        assert view._config_error_details.toPlainText() == fresh.detail
+    assert "fresh-secret" not in fresh.detail
+    window.supervisor_manager.restart_service.assert_not_called()
+
+
+@pytest.mark.parametrize("should_restart", [False, True])
+@pytest.mark.parametrize("read_only", [False, True])
+@pytest.mark.parametrize("source", [
+    b'# odd spacing\nai: {api_base: "https://x", model: "old", temperature: 0.2} # keep\n',
+    b"# omitted managed leaves\nai: { messages_default_max_tokens: 8192 }\n",
+])
+def test_no_op_skips_all_file_operations(endpoint_window, monkeypatch, should_restart, read_only, source):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    path = window.apps[app_id].relative_path / "config.yaml"
+    path.write_bytes(source)
+    path.chmod(0o440 if read_only else 0o640)
+    window._load_config(app_id)
+    before = owned_state(window)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    entries = set(path.parent.iterdir())
+    forbidden = Mock(side_effect=AssertionError("no-op reached file operation"))
+    monkeypatch.setattr(mw, "write_app_config", forbidden)
+    monkeypatch.setattr(mw, "probe_protocol_support", forbidden)
+    monkeypatch.setattr(yaml_manager, "render_app_config", forbidden)
+    monkeypatch.setattr(transaction_module, "Transaction", forbidden)
+    window._on_save_requested(app_id, window.views[app_id].get_current_draft(), should_restart)
+    assert window.views[app_id]._config_error_label.text() == (
+        "Configuration saved. Restart requested." if should_restart else "Configuration saved."
+    )
+    assert_owned_state(window, before)
+    forbidden.assert_not_called()
+    assert path.read_bytes() == source and stat.S_IMODE(path.stat().st_mode) == mode
+    assert set(path.parent.iterdir()) == entries
+    if should_restart:
+        window.supervisor_manager.restart_service.assert_called_once_with(app_id)
+    else:
+        window.supervisor_manager.restart_service.assert_not_called()
+
+
+@pytest.mark.parametrize("raw_value", [b'"/bad"', b"null", b"''", b"1", b"false"])
+def test_explicit_raw_repair_to_auto_reaches_real_writer(endpoint_window, monkeypatch, raw_value):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    path = window.apps[app_id].relative_path / "config.yaml"
+    path.write_bytes(b"ai:\n  api_base: https://x\n  model: old\n  endpoint: " + raw_value + b"\n")
+    window._load_config(app_id)
+    old = window._snapshots[app_id]
+    assert old.config.endpoint is None and old.config.endpoint_raw is not None
+    view = window.views[app_id]
+    view._protocol_combo.setCurrentIndex(0)
+    candidate = view.get_current_draft()
+    assert candidate.endpoint is None and candidate.endpoint_raw is None
+    writer = Mock(wraps=mw.write_app_config)
+    probe = Mock(side_effect=AssertionError("raw removal probed"))
+    monkeypatch.setattr(mw, "write_app_config", writer)
+    monkeypatch.setattr(mw, "probe_protocol_support", probe)
+    window._on_save_requested(app_id, candidate, False)
+    writer.assert_called_once_with(window.apps[app_id], candidate,
+                                   baseline=old.config, expected_sha256=old.sha256)
+    assert b"endpoint" not in path.read_bytes()
+    assert window._snapshots[app_id].sha256 == sha256(path.read_bytes()).digest()
+    assert window._snapshots[app_id].config.endpoint_raw is None
+    probe.assert_not_called()
+
+
+def test_other_forged_shape_uses_local_save_error(endpoint_window, monkeypatch):
+    window = endpoint_window
+    old = owned_state(window)
+    writer = Mock(side_effect=AssertionError("invalid shape wrote"))
+    probe = Mock(side_effect=AssertionError("invalid shape probed"))
+    failures = Mock(wraps=window._on_structured_save_failed)
+    monkeypatch.setattr(mw, "write_app_config", writer)
+    monkeypatch.setattr(mw, "probe_protocol_support", probe)
+    monkeypatch.setattr(window, "_on_structured_save_failed", failures)
+    candidate = AppAIConfig.model_construct(api_base=123, endpoint="/v1/messages")
+    window._on_save_requested("ai-grammar", candidate, True)
+    error = failures.call_args.args[1]
+    assert type(error) is ConfigError
+    assert str(error).startswith("Configuration save failed: ") and "api_base" in str(error)
+    assert_owned_state(window, old)
+    writer.assert_not_called()
+    probe.assert_not_called()
+    window.supervisor_manager.restart_service.assert_not_called()
+
+
+def test_two_saves_advance_actual_digest_and_presence(endpoint_window, monkeypatch):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    path = window.apps[app_id].relative_path / "config.yaml"
+    path.write_bytes(b"# intentional defaults\nai: {messages_default_max_tokens: 8192}\n")
+    window._load_config(app_id)
+    old = window._snapshots[app_id]
+    writer = Mock(wraps=mw.write_app_config)
+    probe = Mock(return_value=supported())
+    monkeypatch.setattr(mw, "write_app_config", writer)
+    monkeypatch.setattr(mw, "probe_protocol_support", probe)
+    view = window.views[app_id]
+    view._protocol_combo.setCurrentIndex(view._protocol_combo.findData("/v1/messages"))
+    window._on_save_requested(app_id, view.get_current_draft(), False)
+    first = window._snapshots[app_id]
+    assert first.sha256 == sha256(path.read_bytes()).digest() and first.sha256 != old.sha256
+    assert first.api_base_present is False and b"api_base" not in path.read_bytes()
+    assert view._request_url_label.text() == "Request URL: https://api.openai.com/v1/messages"
+    for model, base in (("model-one", "https://explicit"), ("model-two", "https://explicit")):
+        previous = window._snapshots[app_id]
+        previous_bytes = path.read_bytes()
+        view._model_combo.setEditText(model)
+        view._base_url_edit.setText(base)
+        candidate = view.get_current_draft()
+        window._on_save_requested(app_id, candidate, False)
+        current = window._snapshots[app_id]
+        assert writer.call_args.kwargs["expected_sha256"] == sha256(previous_bytes).digest() == previous.sha256
+        assert writer.call_args.kwargs["baseline"] is previous.config
+        assert current.sha256 == sha256(path.read_bytes()).digest() != previous.sha256
+        assert current.config == candidate and current.api_base_present is True
+        assert view._request_url_label.text() == "Request URL: https://explicit/v1/messages"
+        assert window._saved_configs[app_id] == window._draft_configs[app_id] == candidate
+        assert len({id(current.config), id(window._saved_configs[app_id]), id(window._draft_configs[app_id])}) == 3
+    assert writer.call_count == 3
+    probe.assert_called_once_with(window.apps[app_id])
+    window.supervisor_manager.restart_service.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["local", "copy", "restored", "unknown"])
+def test_precommit_failure_retains_all_owned_values(endpoint_window, monkeypatch, failure):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    view = window.views[app_id]
+    view._model_combo.setEditText("pending")
+    candidate = view.get_current_draft()
+    before = owned_state(window)
+    path = window.apps[app_id].relative_path / "config.yaml"
+    raw = path.read_bytes()
+    report = TransactionReport(phase="rollback", files={path: "unknown" if failure == "unknown" else "restored"},
+                               error="primary transaction fixture")
+    error = TransactionError(report) if failure in ("restored", "unknown") else OSError("precommit fixture")
+    writer = Mock(side_effect=error)
+    dialog = Mock()
+    monkeypatch.setattr(mw, "write_app_config", writer)
+    monkeypatch.setattr(mw, "TransactionReportDialog", dialog)
+    if failure == "copy":
+        def broken_copy(*args, **kwargs):
+            raise RecursionError("precommit copy fixture")
+        monkeypatch.setattr(AppAIConfig, "model_copy", broken_copy)
+    window._on_save_requested(app_id, candidate, True)
+    assert_owned_state(window, before)
+    assert path.read_bytes() == raw and view.get_current_draft() == candidate
+    assert window._load_failed[app_id] is (failure == "unknown")
+    assert view._save_only_btn.isEnabled() is (failure != "unknown")
+    assert view._save_restart_btn.isEnabled() is (failure != "unknown")
+    assert view._reload_btn.isHidden() is (failure != "unknown")
+    if failure in ("restored", "unknown"):
+        dialog.assert_called_once_with(report, window)
+        assert "primary transaction fixture" in view._config_error_label.text()
+    else:
+        assert view._config_error_label.text().startswith("Configuration save failed: ")
+    if failure == "copy":
+        writer.assert_not_called()
+    if failure == "unknown":
+        writer.reset_mock()
+        window._on_save_requested(app_id, candidate, False)
+        writer.assert_not_called()
+    window.supervisor_manager.restart_service.assert_not_called()
+
+
+def test_stale_save_uses_llm_recovery_and_retains_external_bytes(endpoint_window, monkeypatch):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    view = window.views[app_id]
+    view._model_combo.setEditText("pending")
+    candidate = view.get_current_draft()
+    before = owned_state(window)
+    path = window.apps[app_id].relative_path / "config.yaml"
+    external = path.read_bytes() + b"# external edit\n"
+    external = external.replace(b"ai:\n", b"ai:\n  endpoint: /v1/messages\n")
+    path.write_bytes(external)
+    stale_dialog = Mock()
+    monkeypatch.setattr(mw, "StaleDocumentDialog", stale_dialog)
+    failures = Mock(wraps=window._on_structured_save_failed)
+    monkeypatch.setattr(window, "_on_structured_save_failed", failures)
+    window._on_save_requested(app_id, candidate, True)
+    assert view._config_error_label.text() == "Configuration changed on disk; save refused. Reload the configuration before saving."
+    error = failures.call_args.args[1]
+    assert isinstance(error, StaleDocumentError)
+    assert error.expected_sha256 == before[0][0].sha256 and error.actual_sha256 == sha256(external).digest()
+    assert_owned_state(window, before)
+    assert view.get_current_draft() == candidate and path.read_bytes() == external
+    assert window._load_failed[app_id] and not view._reload_btn.isHidden()
+    assert not view._save_only_btn.isEnabled() and not view._save_restart_btn.isEnabled()
+    stale_dialog.assert_not_called()
+    assert not list(path.parent.glob("*.bak"))
+    window.supervisor_manager.restart_service.assert_not_called()
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_coordinator_installs_committed_cleanup_outcome(endpoint_window, monkeypatch, typed):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    view = window.views[app_id]
+    view._model_combo.setEditText("committed-fixture")
+    view._base_url_edit.setText("https://committed")
+    candidate = view.get_current_draft()
+    old = window._snapshots[app_id]
+    path = window.apps[app_id].relative_path / "config.yaml"
+    actual_writer = mw.write_app_config
+    displays = Mock(wraps=view.load_config)
+    monkeypatch.setattr(view, "load_config", displays)
+    if typed:
+        def writer(meta, value, *, baseline, expected_sha256):
+            digest = actual_writer(meta, value, baseline=baseline, expected_sha256=expected_sha256)
+            raise CommittedWriteError(path, digest, TransactionReport(phase="complete", files={path: "new"}, committed=True),
+                                      OSError("post-commit unlock fixture"))
+        monkeypatch.setattr(mw, "write_app_config", writer)
+    else:
+        original_exit = Transaction.__exit__
+        def failing_exit(self, kind, error, tb):
+            result = original_exit(self, kind, error, tb)
+            if error is None:
+                raise OSError("post-commit unlock fixture")
+            return result
+        monkeypatch.setattr(Transaction, "__exit__", failing_exit)
+    window._on_save_requested(app_id, candidate, True)
+    installed = window._snapshots[app_id]
+    assert b"committed-fixture" in path.read_bytes()
+    assert installed.sha256 == sha256(path.read_bytes()).digest()
+    assert installed is not old and installed.config == candidate and installed.api_base_present is True
+    assert window._saved_configs[app_id] == window._draft_configs[app_id] == candidate
+    assert len({id(installed.config), id(window._saved_configs[app_id]), id(window._draft_configs[app_id])}) == 3
+    assert old.config.model == "original-grammar"
+    assert view._config_error_label.text() == "Configuration saved, but the file must be reloaded before another save."
+    assert view._config_error_details.toPlainText() == "post-commit unlock fixture"
+    assert window._load_failed[app_id] and not view._reload_btn.isHidden()
+    assert not view._save_only_btn.isEnabled() and not view._save_restart_btn.isEnabled()
+    displays.assert_not_called()
+    window.supervisor_manager.restart_service.assert_not_called()
+    # A second submission cannot use the committed error as permission to write again.
+    forbidden = Mock(side_effect=AssertionError("save after committed cleanup failure"))
+    monkeypatch.setattr(mw, "write_app_config", forbidden)
+    window._on_save_requested(app_id, candidate, True)
+    forbidden.assert_not_called()
+    assert window._snapshots[app_id] is installed
+
+
+@pytest.mark.parametrize("display_seam", ["load_config", "dirty", "auth", "late_copy"])
+def test_post_commit_display_failure_retains_committed_snapshot(endpoint_window, monkeypatch, display_seam):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    path = window.apps[app_id].relative_path / "config.yaml"
+    path.write_bytes(b"ai: {model: original}\n")
+    window._load_config(app_id)
+    old = window._snapshots[app_id]
+    view = window.views[app_id]
+    view._model_combo.setEditText("committed-display-fixture")
+    view._base_url_edit.setText("https://explicit")
+    candidate = view.get_current_draft()
+    if display_seam == "late_copy":
+        actual_writer = mw.write_app_config
+        actual_copy = AppAIConfig.model_copy
+        def fail_copy(*args, **kwargs):
+            raise RecursionError("display fixture")
+        def writer(*args, **kwargs):
+            digest = actual_writer(*args, **kwargs)
+            monkeypatch.setattr(AppAIConfig, "model_copy", fail_copy)
+            return digest
+        monkeypatch.setattr(mw, "write_app_config", writer)
+    else:
+        broken = Mock(side_effect=RuntimeError("display fixture"))
+        if display_seam == "load_config":
+            monkeypatch.setattr(view, "load_config", broken)
+        else:
+            monkeypatch.setattr(window, "_set_dirty_indicator" if display_seam == "dirty" else "_update_auth_warnings", broken)
+    unexpected = None
+    try:
+        window._on_save_requested(app_id, candidate, True)
+    except Exception as exc:
+        unexpected = exc
+    installed = window._snapshots[app_id]
+    assert b"committed-display-fixture" in path.read_bytes()
+    assert installed.sha256 == sha256(path.read_bytes()).digest()
+    assert installed is not old and installed.config == candidate and installed.api_base_present is True
+    assert window._saved_configs[app_id] == window._draft_configs[app_id] == candidate
+    assert len({id(installed.config), id(window._saved_configs[app_id]), id(window._draft_configs[app_id])}) == 3
+    assert window._load_failed[app_id] and not view._save_only_btn.isEnabled()
+    assert not view._save_restart_btn.isEnabled() and not view._reload_btn.isHidden()
+    assert view._config_error_label.text() == "Configuration saved, but the file must be reloaded before another save."
+    assert view._config_error_details.toPlainText() == "display fixture"
+    assert old.api_base_present is False and old.config.model == "original"
+    assert unexpected is None
+    window.supervisor_manager.restart_service.assert_not_called()
+    if display_seam == "late_copy":
+        monkeypatch.setattr(AppAIConfig, "model_copy", actual_copy)
+
+
+def test_primary_unknown_transaction_error_survives_cleanup_at_save_seam(endpoint_window, monkeypatch):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    view = window.views[app_id]
+    view._model_combo.setEditText("pending")
+    candidate = view.get_current_draft()
+    before = owned_state(window)
+    path = window.apps[app_id].relative_path / "config.yaml"
+    original_replace, original_release, original_sync = (
+        Transaction.replace_all, Transaction._release, Transaction._fsync_dir
+    )
+    observed = []
+
+    def failing_replace(tx):
+        try:
+            return original_replace(tx)
+        except TransactionError as exc:
+            observed.append(exc)
+            raise
+
+    def failing_sync(tx, parent):
+        if tx._state in ("replacing", "rolling-back"):
+            raise OSError("replace/restore fsync fixture")
+        return original_sync(tx, parent)
+
+    def failing_release(tx):
+        original_release(tx)
+        raise OSError("cleanup fixture")
+
+    monkeypatch.setattr(Transaction, "replace_all", failing_replace)
+    monkeypatch.setattr(Transaction, "_fsync_dir", failing_sync)
+    monkeypatch.setattr(Transaction, "_release", failing_release)
+    failures = Mock(wraps=window._on_structured_save_failed)
+    dialog = Mock()
+    monkeypatch.setattr(window, "_on_structured_save_failed", failures)
+    monkeypatch.setattr(mw, "TransactionReportDialog", dialog)
+    window._on_save_requested(app_id, candidate, True)
+    assert window._load_failed[app_id]
+    assert len(observed) == 1
+    primary = observed[0]
+    assert failures.call_args.args[1] is primary and primary.report.files == {path: "unknown"}
+    assert isinstance(primary.__cause__, OSError) and str(primary.__cause__) == "cleanup fixture"
+    dialog.assert_called_once_with(primary.report, window)
+    assert_owned_state(window, before)
+    assert view.get_current_draft() == candidate
+    assert not view._save_only_btn.isEnabled() and not view._save_restart_btn.isEnabled()
+    assert not view._reload_btn.isHidden()
+    assert view._config_error_label.text() == str(primary)
+    window.supervisor_manager.restart_service.assert_not_called()
