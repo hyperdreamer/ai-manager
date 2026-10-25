@@ -625,3 +625,180 @@ def test_saved_notice_preserves_validator_details_until_next_load(
     window._reload_config("chat2api")
     assert view._details.toPlainText() == ""
     assert view._validation_label.text() == "Not validated since load."
+
+
+def test_dependent_reconcile_uses_actual_snapshot_for_second_save(qtbot, window, monkeypatch):
+    monkeypatch.setattr(
+        mw.BlastRadiusDialog,
+        "selected_app_ids",
+        lambda self: ("textkit",),
+    )
+    textkit = window.views["textkit"]
+    textkit._split_chk.setChecked(False)
+    draft = port_draft(window)
+    window._on_config_changed("chat2api", draft)
+    window._on_save_requested("chat2api", draft, False)
+    assert "chat2api" in window._save_jobs
+
+    # This edit happens after the worker captured its dependent match.
+    textkit._model_combo.setEditText("pending-model")
+    window._save_jobs["chat2api"].run()
+    qtbot.waitUntil(lambda: "chat2api" not in window._save_jobs)
+
+    from ai_manager.config.yaml_manager import read_app_config_snapshot
+
+    path = window.apps["textkit"].relative_path / window.apps["textkit"].config_file_name
+    observed = read_app_config_snapshot(window.apps["textkit"])
+    assert observed.config.api_base == "http://127.0.0.1:8123"
+    assert observed.sha256 == hashlib.sha256(path.read_bytes()).digest()
+    assert window._snapshots["textkit"] == observed
+    assert window._draft_configs["textkit"].model == "pending-model"
+    assert window._draft_configs["textkit"].api_base == observed.config.api_base
+
+    pending = textkit.get_current_draft()
+    window._on_config_changed("textkit", pending)
+    window._on_save_requested("textkit", pending, False)
+    assert not window._save_jobs
+    saved = read_app_config_snapshot(window.apps["textkit"])
+    assert saved.config.api_base == "http://127.0.0.1:8123"
+    assert saved.config.model == "pending-model"
+    assert saved.sha256 == hashlib.sha256(path.read_bytes()).digest()
+    assert not window._load_failed["textkit"]
+    assert not window._is_dirty("textkit")
+
+
+def test_dependent_result_wrong_path_keeps_owned_state_blocked(window, tmp_path, monkeypatch):
+    app_id = "textkit"
+    meta = window.apps[app_id]
+    path = meta.relative_path / meta.config_file_name
+    old = tuple(store[app_id] for store in (window._snapshots, window._saved_configs, window._draft_configs))
+    wrong = tmp_path / "reported-config.yaml"
+    wrong.write_bytes(path.read_bytes())
+    reader = MagicMock(side_effect=AssertionError("wrong result path must be rejected before reread"))
+    monkeypatch.setattr(mw, "read_app_config_snapshot", reader)
+
+    window._reconcile_dependent_views({app_id: wrong})
+
+    reader.assert_not_called()
+
+    assert all(store[app_id] is previous for store, previous in zip(
+        (window._snapshots, window._saved_configs, window._draft_configs), old
+    ))
+    assert window._load_failed[app_id]
+    assert not window.views[app_id]._save_only_btn.isEnabled()
+    assert not window.views[app_id]._reload_btn.isHidden()
+    assert "Dependent result path does not match" in window.views[app_id]._config_error_details.toPlainText()
+
+
+def test_bare_dependent_result_is_rejected_at_save_boundary(window):
+    app_id = "textkit"
+    old = tuple(store[app_id] for store in (window._snapshots, window._saved_configs, window._draft_configs))
+    result = SaveResult(
+        document=window._saved_configs["chat2api"],
+        transaction=TransactionReport(phase="complete", committed=True),
+        validation=ValidationResult("manager-only", "fixture"),
+        saved_dependents={app_id: AppAIConfig(api_base="https://untrusted")},
+    )
+
+    window._on_structured_saved("chat2api", result)
+
+    assert all(store[app_id] is previous for store, previous in zip(
+        (window._snapshots, window._saved_configs, window._draft_configs), old
+    ))
+    assert window._load_failed[app_id]
+    assert not window.views[app_id]._save_only_btn.isEnabled()
+    assert not window.views[app_id]._reload_btn.isHidden()
+    assert window.views["chat2api"]._notice_label.text() == "Configuration saved."
+
+
+def test_dependent_reconcile_missing_file_does_not_create_example(window):
+    app_id = "textkit"
+    path = window.apps[app_id].relative_path / window.apps[app_id].config_file_name
+    old = tuple(store[app_id] for store in (window._snapshots, window._saved_configs, window._draft_configs))
+    path.unlink()
+
+    window._reconcile_dependent_views({app_id: path})
+
+    assert not path.exists()
+    assert all(store[app_id] is previous for store, previous in zip(
+        (window._snapshots, window._saved_configs, window._draft_configs), old
+    ))
+    assert window._load_failed[app_id]
+
+
+def test_dependent_reread_failure_does_not_mask_primary_commit(qtbot, window, monkeypatch):
+    monkeypatch.setattr(
+        mw.BlastRadiusDialog,
+        "selected_app_ids",
+        lambda self: ("textkit",),
+    )
+    dependent_id = "textkit"
+    dependent_path = window.apps[dependent_id].relative_path / window.apps[dependent_id].config_file_name
+    old_dependent = tuple(
+        store[dependent_id]
+        for store in (window._snapshots, window._saved_configs, window._draft_configs)
+    )
+    real_reader = mw.read_app_config_snapshot
+
+    def fail_after_commit(meta):
+        if meta.id == dependent_id:
+            dependent_path.unlink()
+            raise RuntimeError("post-commit dependent read failed")
+        return real_reader(meta)
+
+    monkeypatch.setattr(mw, "read_app_config_snapshot", fail_after_commit)
+    draft = port_draft(window)
+    window._on_config_changed("chat2api", draft)
+    window._on_save_requested("chat2api", draft, False)
+    window._save_jobs["chat2api"].run()
+    qtbot.waitUntil(lambda: "chat2api" not in window._save_jobs)
+
+    assert window._saved_configs["chat2api"].doc["server"]["port"] == 8123
+    primary_path = window._saved_configs["chat2api"].path
+    assert window._saved_configs["chat2api"].raw_sha256 == hashlib.sha256(
+        primary_path.read_bytes()
+    ).digest()
+    assert window.views["chat2api"]._notice_label.text() == "Configuration saved."
+    assert all(store[dependent_id] is previous for store, previous in zip(
+        (window._snapshots, window._saved_configs, window._draft_configs), old_dependent
+    ))
+    assert window._load_failed[dependent_id]
+    assert not window.views[dependent_id]._save_only_btn.isEnabled()
+    assert not window.views[dependent_id]._reload_btn.isHidden()
+
+
+def test_mixed_dependent_reconcile_keeps_successes_when_one_reread_fails(window, monkeypatch):
+    failed_id = "textkit"
+    adopted_id = "ai-grammar"
+    paths = {
+        app_id: window.apps[app_id].relative_path / window.apps[app_id].config_file_name
+        for app_id in (failed_id, adopted_id)
+    }
+    old_failed = tuple(
+        store[failed_id]
+        for store in (window._snapshots, window._saved_configs, window._draft_configs)
+    )
+    real_reader = mw.read_app_config_snapshot
+    seen = []
+
+    def read_selected(meta):
+        seen.append(meta)
+        if meta.id == failed_id:
+            raise RuntimeError("selected dependent reread failed")
+        return real_reader(meta)
+
+    monkeypatch.setattr(mw, "read_app_config_snapshot", read_selected)
+    window._reconcile_dependent_views({failed_id: paths[failed_id], adopted_id: paths[adopted_id]})
+
+    assert all(store[failed_id] is previous for store, previous in zip(
+        (window._snapshots, window._saved_configs, window._draft_configs), old_failed
+    ))
+    assert window._load_failed[failed_id]
+    assert not window.views[failed_id]._save_only_btn.isEnabled()
+    assert not window.views[failed_id]._reload_btn.isHidden()
+    assert [meta.id for meta in seen] == [failed_id, adopted_id]
+    observed = real_reader(window.apps[adopted_id])
+    assert window._snapshots[adopted_id] == observed
+    assert window._snapshots[adopted_id].sha256 == observed.sha256
+    assert window._saved_configs[adopted_id] == observed.config
+    assert not window._load_failed[adopted_id]

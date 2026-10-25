@@ -918,32 +918,87 @@ class MainWindow(QMainWindow):
                     pass
             self.views[app_id].show_auth_warnings(tuple(warnings))
 
-    def _reconcile_dependent_views(self, saved_dependents: dict[str, AppAIConfig]) -> None:
-        """Install committed dependent baselines without discarding dirty drafts."""
-        for app_id in saved_dependents:
-            meta, view = self.apps[app_id], self.views[app_id]
-            try:
-                # The interim result still carries a bare config. Ownership must
-                # come from the registered file's actual bytes instead.
-                snapshot = read_app_config_snapshot(meta)
-                saved = copy.deepcopy(snapshot.config)
-                dirty = self._is_dirty(app_id)
-                conflicts = view.adopt_saved_baseline(snapshot, preserve_draft=dirty)
-                # The widgets rehearsed their own three-way merge, so the retained
-                # draft must be what they now show: keeping the pre-rebase copy here
-                # would leave the coordinator comparing against values the user can
-                # no longer see (and dirty state computed from them).
-                draft = copy.deepcopy(view.get_current_draft()) if dirty else copy.deepcopy(snapshot.config)
-            except Exception as exc:
-                self._show_llm_load_error(app_id, exc)
+    def _mark_dependent_reconcile_failure(self, app_id: str, error: Exception) -> None:
+        if app_id not in self.apps or app_id not in self.views:
+            return
+        self._load_failed[app_id] = True
+        self.views[app_id].set_recovery_state(
+            load_failed=True,
+            conflicts=self._baseline_conflict.get(app_id, ()),
+            message=str(error),
+            detail=getattr(error, "detail", str(error)),
+        )
+
+    def _reconcile_dependent_views(self, saved_dependents: dict[str, Path]) -> None:
+        """Install committed dependent baselines from their actual files."""
+        order = (
+            "api_base", "api_key", "endpoint", "is_split_model",
+            "model", "ocr_model", "text_model",
+        )
+        for app_id, reported_path in saved_dependents.items():
+            if app_id not in self.apps or app_id not in self.views:
                 continue
-            self._snapshots[app_id] = snapshot
-            self._saved_configs[app_id] = saved
-            self._draft_configs[app_id] = draft
-            if conflicts:
-                self._baseline_conflict[app_id] = conflicts
-            else:
-                self._baseline_conflict.pop(app_id, None)
+            meta, view = self.apps[app_id], self.views[app_id]
+            registered = meta.relative_path / meta.config_file_name
+            canonical = registered.parent.resolve() / registered.name
+            previous_view_snapshot = getattr(view, "_snapshot", None)
+            try:
+                previous_view_draft = view.get_current_draft()
+            except Exception:
+                previous_view_draft = None
+            adopted = False
+            try:
+                if isinstance(reported_path, AppAIConfig):
+                    # Keep direct calls from the pre-path helper contract working;
+                    # SaveResult publication rejects this legacy value below.
+                    reported_path = canonical
+                if (
+                    meta.config_kind != "llm"
+                    or not isinstance(reported_path, Path)
+                    or reported_path != canonical
+                ):
+                    raise ConfigLoadError(
+                        registered,
+                        "Dependent result path does not match the registered configuration path.",
+                    )
+                observed = read_app_config_snapshot(meta)
+                saved_copy = observed.config.model_copy(deep=True)
+                if previous_view_snapshot is None:
+                    view.load_config(observed)
+                    conflicts = ()
+                else:
+                    conflicts = view.adopt_saved_baseline(observed, preserve_draft=True)
+                adopted = True
+                draft_copy = view.get_current_draft().model_copy(deep=True)
+            except Exception as exc:
+                if adopted and previous_view_snapshot is not None and previous_view_draft is not None:
+                    try:
+                        AppDetailView.load_config(view, previous_view_snapshot)
+                        AppDetailView._display_draft(view, previous_view_draft)
+                    except Exception:
+                        pass
+                self._mark_dependent_reconcile_failure(app_id, exc)
+                continue
+
+            self._snapshots[app_id] = observed
+            self._saved_configs[app_id] = saved_copy
+            self._draft_configs[app_id] = draft_copy
+            conflict_set = set(self._baseline_conflict.get(app_id, ())) | set(conflicts)
+            owned_conflicts = tuple(name for name in order if name in conflict_set)
+            self._baseline_conflict[app_id] = owned_conflicts
+            load_failed = self._load_failed.get(app_id, False)
+            view.set_recovery_state(
+                load_failed=load_failed,
+                conflicts=owned_conflicts,
+                message=(
+                    "Configuration changed while you were editing. Reload the configuration before saving."
+                    if owned_conflicts else ""
+                ),
+                detail=(
+                    "Conflicting fields: " + ", ".join(owned_conflicts) + "."
+                    if owned_conflicts else ""
+                ),
+            )
             self._set_dirty_indicator(app_id)
 
     @pyqtSlot(str, object)
@@ -958,7 +1013,26 @@ class MainWindow(QMainWindow):
         view.set_save_in_progress(False)
         self._update_configured_port(app_id, result.document)
         self._set_dirty_indicator(app_id)
-        self._reconcile_dependent_views(result.saved_dependents)
+        invalid_dependents = {
+            dependent_id: reported_path
+            for dependent_id, reported_path in result.saved_dependents.items()
+            if not isinstance(reported_path, Path)
+        }
+        for dependent_id in invalid_dependents:
+            if dependent_id in self.apps and dependent_id in self.views:
+                registered = self.apps[dependent_id].relative_path / self.apps[dependent_id].config_file_name
+                self._mark_dependent_reconcile_failure(
+                    dependent_id,
+                    ConfigLoadError(
+                        registered,
+                        "Dependent result path must be a canonical Path.",
+                    ),
+                )
+        self._reconcile_dependent_views({
+            dependent_id: reported_path
+            for dependent_id, reported_path in result.saved_dependents.items()
+            if isinstance(reported_path, Path)
+        })
         self._update_auth_warnings()
         if should_restart:
             self._request_saved_restart(app_id)

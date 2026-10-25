@@ -87,7 +87,7 @@ class SaveResult:
     document: StructuredDoc
     transaction: TransactionReport
     validation: ValidationResult
-    saved_dependents: dict[str, AppAIConfig] = field(default_factory=dict)
+    saved_dependents: dict[str, Path] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -308,7 +308,100 @@ def test_dependent_commit_normalizes_with_dependent_metadata(five_app_workspace,
     _write_dependent(youtube_path, "  endpoint: /hand-written/value\n")
     matches = find_affected_dependents(apps, before, after)
     result = sc.commit("chat2api", before.path, after, before.raw_sha256, dependents=matches)
-    assert result.saved_dependents["ai-grammar"].endpoint == "/v1/messages"
-    assert (result.saved_dependents["yt2txt"].endpoint, result.saved_dependents["yt2txt"].endpoint_raw) == (None, None)
-    assert b"  endpoint: /v1/messages\n" in grammar_path.read_bytes()
-    assert b"  endpoint: /hand-written/value\n" in youtube_path.read_bytes()
+    from ai_manager.config.yaml_manager import read_app_config_snapshot
+    assert result.saved_dependents["ai-grammar"] == grammar_path.parent.resolve() / grammar_path.name
+    assert result.saved_dependents["yt2txt"] == youtube_path.parent.resolve() / youtube_path.name
+    grammar_snapshot = read_app_config_snapshot(apps["ai-grammar"])
+    youtube_snapshot = read_app_config_snapshot(apps["yt2txt"])
+    assert grammar_snapshot.config.endpoint == "/v1/messages"
+    assert (youtube_snapshot.config.endpoint, youtube_snapshot.config.endpoint_raw) == (None, None)
+
+
+def test_selected_dependent_commit_preserves_endpoint_and_unmanaged_bytes(five_app_workspace, monkeypatch):
+    from ai_manager.config import structured_config as sc
+    import ai_manager.config.yaml_manager as yaml_manager
+    from ai_manager.config.blast_radius import find_affected_dependents
+    from ai_manager.config.structured_models import ValidationResult
+    import ai_manager.services.service_validation as service
+
+    monkeypatch.setattr(service, "validate_candidate", lambda *a: ValidationResult("service", "fixture valid"))
+    monkeypatch.setattr(yaml_manager, "_apply_ai_config", lambda *a, **k: pytest.fail("dependent commit must not use the full LLM mutator"))
+    monkeypatch.setattr(yaml_manager, "write_app_config", lambda *a, **k: pytest.fail("dependent commit must not use the LLM writer"))
+    original_config_from_document = yaml_manager._config_from_document
+    normalized_metadata = []
+
+    def record_config_from_document(tree, meta):
+        normalized_metadata.append(meta)
+        return original_config_from_document(tree, meta)
+
+    monkeypatch.setattr(yaml_manager, "_config_from_document", record_config_from_document)
+    apps, before, after = drafts(five_app_workspace)
+    grammar_path = apps["ai-grammar"].relative_path / "config.yaml"
+    textkit_path = apps["textkit"].relative_path / "config.yaml"
+    youtube_path = apps["yt2txt"].relative_path / "config.yaml"
+    _write_dependent(grammar_path, "  endpoint: /v1/messages # keep messages\n")
+    _write_dependent(textkit_path, '  endpoint: "/bad" # keep invalid\n')
+    _write_dependent(youtube_path, "  endpoint: [legacy, keep] # unmanaged\n")
+    originals = {path: path.read_bytes() for path in (grammar_path, textkit_path, youtube_path)}
+    matches = find_affected_dependents(apps, before, after)
+    selected = tuple(match for match in matches if match.meta.id in {"ai-grammar", "yt2txt"})
+    result = sc.commit("chat2api", before.path, after, before.raw_sha256, dependents=selected)
+    assert [meta.id for meta in normalized_metadata] == ["ai-grammar", "yt2txt"]
+    assert all(meta is apps[meta.id] for meta in normalized_metadata)
+    assert grammar_path.read_bytes() == render_app_config(
+        apps["ai-grammar"], selected[0].doc,
+        lambda tree: tree["ai"].__setitem__("api_base", selected[0].new_api_base),
+    )
+    assert youtube_path.read_bytes() == render_app_config(
+        apps["yt2txt"], selected[1].doc,
+        lambda tree: tree["ai"].__setitem__("api_base", selected[1].new_api_base),
+    )
+    assert textkit_path.read_bytes() == originals[textkit_path]
+    assert b"endpoint: /v1/messages # keep messages" in grammar_path.read_bytes()
+    assert b"endpoint: [legacy, keep] # unmanaged" in youtube_path.read_bytes()
+    assert set(result.saved_dependents) == {"ai-grammar", "yt2txt"}
+
+
+def test_dependent_commit_preserves_explicit_null_endpoint(five_app_workspace, monkeypatch):
+    from ai_manager.config import structured_config as sc
+    from ai_manager.config.blast_radius import find_affected_dependents
+    from ai_manager.config.structured_models import ValidationResult
+    from ai_manager.config.yaml_manager import read_app_config_snapshot
+    import ai_manager.services.service_validation as service
+
+    monkeypatch.setattr(service, "validate_candidate", lambda *a: ValidationResult("service", "fixture valid"))
+    apps, before, after = drafts(five_app_workspace)
+    path = apps["textkit"].relative_path / "config.yaml"
+    _write_dependent(path, "  endpoint: null # preserve null\n")
+    original = path.read_bytes()
+    match = next(m for m in find_affected_dependents(apps, before, after) if m.meta.id == "textkit")
+    result = sc.commit("chat2api", before.path, after, before.raw_sha256, dependents=(match,))
+    assert result.saved_dependents["textkit"] == path.parent.resolve() / path.name
+    assert path.read_bytes() == render_app_config(
+        apps["textkit"], match.doc,
+        lambda tree: tree["ai"].__setitem__("api_base", match.new_api_base),
+    )
+    assert path.read_bytes() != original
+    observed = read_app_config_snapshot(apps["textkit"])
+    assert observed.config.endpoint is None
+    assert observed.config.endpoint_raw == "None"
+
+
+def test_selected_invalid_endpoint_remains_raw_evidence(five_app_workspace, monkeypatch):
+    from ai_manager.config import structured_config as sc
+    from ai_manager.config.blast_radius import find_affected_dependents
+    from ai_manager.config.structured_models import ValidationResult
+    from ai_manager.config.yaml_manager import read_app_config_snapshot
+    import ai_manager.services.service_validation as service
+
+    monkeypatch.setattr(service, "validate_candidate", lambda *a: ValidationResult("service", "fixture valid"))
+    apps, before, after = drafts(five_app_workspace)
+    path = apps["textkit"].relative_path / "config.yaml"
+    _write_dependent(path, '  endpoint: "/bad" # keep invalid\n')
+    match = next(m for m in find_affected_dependents(apps, before, after) if m.meta.id == "textkit")
+    result = sc.commit("chat2api", before.path, after, before.raw_sha256, dependents=(match,))
+    assert result.saved_dependents["textkit"] == path.parent.resolve() / path.name
+    observed = read_app_config_snapshot(apps["textkit"])
+    assert observed.config.endpoint is None
+    assert observed.config.endpoint_raw == "'/bad'"
+    assert b'endpoint: "/bad" # keep invalid' in path.read_bytes()

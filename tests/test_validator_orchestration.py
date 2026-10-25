@@ -372,6 +372,8 @@ def test_save_worker_passes_owned_kind_digest_and_dependents(five_app_workspace,
     assert effective_mutations(owned) == (Mutation(("server", "port"), "set", 8123),)
     result = results[0][1]
     assert result.transaction.committed and set(result.saved_dependents) == {"ai-grammar"}
+    assert result.saved_dependents["ai-grammar"] == selected[0].path.parent.resolve() / selected[0].path.name
+    assert isinstance(result.saved_dependents["ai-grammar"], Path)
     # The captured dependent snapshot is unchanged even though the commit applied it.
     assert selected[0].path.read_bytes() != selected[0].raw_bytes
 

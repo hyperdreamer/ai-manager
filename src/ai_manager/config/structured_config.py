@@ -369,12 +369,13 @@ def commit(
     primary = _save_boundary(lambda: render(kind, doc))
     sealed = {canonical: primary}
     expected = {canonical: expected_sha256}
-    dependent_baselines = {}
+    dependent_ids: set[str] = set()
+    dependent_targets: list[tuple[str, Path]] = []
     scalar_mutations = list(effective_mutations(doc))
     for match in dependents:
         require_llm(match.meta)
         target = match.path.parent.resolve() / match.path.name
-        if target in sealed or match.raw_sha256 != hashlib.sha256(match.raw_bytes).digest():
+        if match.meta.id in dependent_ids or target in sealed or match.raw_sha256 != hashlib.sha256(match.raw_bytes).digest():
             raise ConfigValidationError(
                 (
                     FieldIssue(
@@ -393,10 +394,12 @@ def commit(
             raise ConfigValidationError(
                 (FieldIssue(("ai",), "Dependent AI configuration must be a mapping."),)
             )
+        _save_boundary(lambda: _config_from_document(parsed, match.meta))
         sealed[target] = raw
         expected[target] = match.raw_sha256
         scalar_mutations.append(Mutation(("ai", "api_base"), "set", match.new_api_base))
-        dependent_baselines[match.meta.id] = _config_from_document(parsed, match.meta)
+        dependent_ids.add(match.meta.id)
+        dependent_targets.append((match.meta.id, target))
 
     # Stages 1-2 always run; stage 3 then re-reads only these sealed bytes.
     validate_written_scalars(tuple(scalar_mutations))
@@ -424,4 +427,5 @@ def commit(
         existed=True,
         mode=doc.mode if doc.existed else 0o600,
     )
-    return SaveResult(baseline, report, validation, dependent_baselines)
+    dependent_paths = {dependent_id: target for dependent_id, target in dependent_targets}
+    return SaveResult(baseline, report, validation, dependent_paths)

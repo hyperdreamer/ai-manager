@@ -3,6 +3,7 @@ import hashlib
 import json
 import stat
 from dataclasses import replace
+from pathlib import Path
 import pytest
 from ai_manager.config import structured_config as sc
 from ai_manager.config.app_registry import get_managed_apps
@@ -328,6 +329,35 @@ def test_primary_stage_bytes_are_the_validated_bytes(five_app_workspace, monkeyp
     assert result.saved_dependents == {} and list(result.transaction.files) == [path.resolve()]
 
 
+def test_dependent_result_paths_and_actual_snapshots(five_app_workspace, monkeypatch):
+    import ai_manager.services.service_validation as validation
+    from ai_manager.config.blast_radius import find_affected_dependents
+    from ai_manager.config.yaml_manager import read_app_config_snapshot
+    from ai_manager.config.structured_models import ValidationResult
+
+    monkeypatch.setattr(
+        validation,
+        "validate_candidate",
+        lambda *a: ValidationResult("manager-only", "fixture"),
+    )
+    apps = get_managed_apps(five_app_workspace)
+    path = apps["chat2api"].relative_path / "config.json"
+    before = sc.load("chat2api", path)
+    after = replace(before, mutations=(Mutation(("server", "port"), "set", 8123),))
+    matches = find_affected_dependents(apps, before, after)
+    result = sc.commit("chat2api", path, after, before.raw_sha256, dependents=matches)
+    assert result.transaction.committed
+    for match in matches:
+        target = match.path.parent.resolve() / match.path.name
+        assert result.saved_dependents[match.meta.id] == target
+        assert isinstance(result.saved_dependents[match.meta.id], Path)
+        observed = read_app_config_snapshot(match.meta)
+        assert observed.config.api_base == "http://127.0.0.1:8123"
+        assert observed.sha256 == hashlib.sha256(target.read_bytes()).digest()
+        assert observed.config.endpoint == match.saved_config.endpoint
+        assert observed.config.endpoint_raw == match.saved_config.endpoint_raw
+
+
 def test_dependent_render_never_uses_a_mutating_writer(five_app_workspace, monkeypatch):
     from ai_manager.config.blast_radius import find_affected_dependents
     from ai_manager.config.structured_models import ValidationResult
@@ -346,7 +376,8 @@ def test_dependent_render_never_uses_a_mutating_writer(five_app_workspace, monke
     for match in matches:
         expected = render_app_config(match.meta, match.doc, lambda tree, m=match: tree["ai"].__setitem__("api_base", m.new_api_base))
         assert match.path.read_bytes() == expected
-        assert result.saved_dependents[match.meta.id].api_base == "http://127.0.0.1:8123"
+        assert result.saved_dependents[match.meta.id] == match.path.parent.resolve() / match.path.name
+        assert isinstance(result.saved_dependents[match.meta.id], Path)
         assert match.saved_config.api_base == "http://127.0.0.1:8000"
 
 
