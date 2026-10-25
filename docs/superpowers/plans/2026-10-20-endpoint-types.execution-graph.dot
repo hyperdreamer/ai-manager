@@ -1,0 +1,62 @@
+digraph endpoint_types {
+    rankdir=LR;
+    node [shape=box, style=rounded, fontname="Helvetica"];
+    edge [fontname="Helvetica"];
+    subgraph cluster_core {
+        label="core";
+        style=dashed; color="#8899aa";
+        T_001 [label="Task 1: Define the protocol vocabulary and exact URL helpers\nstandard"];
+        T_002 [label="Task 2: Add canonical endpoint models, snapshots and registry ownership\nadvanced"];
+        T_003 [label="Task 3: Read coherent metadata-aware LLM snapshots without creating files\nadvanced"];
+        T_004 [label="Task 4: Implement diff-only writers and distinguish committed cleanup failure\ncapable"];
+    }
+    subgraph cluster_probe {
+        label="probe";
+        style=dashed; color="#8899aa";
+        T_005 [label="Task 5: Execute authenticated installed-build protocol probes\ncapable"];
+        T_006 [label="Task 6: Cache capabilities by content and guard every generation\ncapable"];
+    }
+    subgraph cluster_ui {
+        label="ui";
+        style=dashed; color="#8899aa";
+        T_007 [label="Task 7: Present snapshot-owned protocol controls and fail closed on load\ncapable"];
+        T_008 [label="Task 8: Deliver generation-bound jobs and complete restart attempts exactly once\nfrontier"];
+        T_009 [label="Task 9: Enforce the ordered gate at the sole LLM commit seam\nfrontier"];
+        T_010 [label="Task 10: Reload LLM files without discarding drafts or entering structured recovery\ncapable"];
+        T_011 [label="Task 11: Rebase each managed field and retain cross-mode conflicts visibly\ncapable"];
+        T_012 [label="Task 12: Reconcile path-valued dependent results from actual installed files\nfrontier"];
+        T_013 [label="Task 13: Apply typed presets and propagate the current endpoint through model discovery\ncapable"];
+    }
+    subgraph cluster_docs {
+        label="docs";
+        style=dashed; color="#8899aa";
+        T_014 [label="Task 14: Document protocol scope and collect complete acceptance evidence\nadvanced"];
+    }
+    T_001 -> T_002;
+    T_002 -> T_003;
+    T_003 -> T_004;
+    T_004 -> T_007;
+    T_004 -> T_008;
+    T_004 -> T_009;
+    T_004 -> T_010;
+    T_004 -> T_011;
+    T_004 -> T_012;
+    T_004 -> T_013;
+    T_004 -> T_014;
+    T_005 -> T_006;
+    T_006 -> T_007;
+    T_006 -> T_008;
+    T_006 -> T_009;
+    T_006 -> T_010;
+    T_006 -> T_011;
+    T_006 -> T_012;
+    T_006 -> T_013;
+    T_006 -> T_014;
+    T_007 -> T_008;
+    T_008 -> T_009;
+    T_009 -> T_010;
+    T_010 -> T_011;
+    T_011 -> T_012;
+    T_012 -> T_013;
+    T_013 -> T_014;
+}
