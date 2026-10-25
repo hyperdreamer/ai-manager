@@ -24,6 +24,37 @@ Desktop administration GUI built with **PyQt6** for managing AI provider configu
 
 *(Excluded: only `free-tts`, which does not rely on an LLM.)*
 
+### Upstream protocol
+
+ai-grammar and textkit expose an Upstream protocol selector: `/v1/chat/completions`
+(OpenAI Chat Completions), `/v1/responses` (OpenAI Responses), and `/v1/messages`
+(Anthropic Messages). Auto omits `ai.endpoint` and keeps that app's legacy behavior.
+Null and empty endpoint values are invalid and require an explicit selection.
+yt2txt continues to use its existing configuration without a protocol row;
+chat2api and file-bridge retain their structured editors.
+
+Explicit protocol paths already contain `/v1`: enter a gateway prefix such as
+`https://api.openai.com`, not `https://api.openai.com/v1`. The request URL preview
+shows the exact target. Conflicting bases are refused without automatic repair.
+With no saved base, ai-grammar's Auto fallback is `https://api.openai.com/v1`;
+textkit and explicit protocols use `https://api.openai.com`.
+
+The capability probe checks the installed service's actual accepted literals.
+A partial build enables its accepted protocols; an unverifiable build refuses
+introducing or changing a protocol. You can keep a saved valid protocol or select
+Auto to remove it. The documented historical support baseline is textkit `2.1.4` or newer
+(`f0cc6ce` was verified), with ai-grammar verified at `6f8c42d`;
+installed capability checking decides acceptance for every checkout.
+Probing imports local service modules, so import side effects remain possible;
+bytecode writes are disabled. A reload is required after stale/conflicted or
+committed-but-unreconciled configuration outcomes.
+
+OpenAI protocols use the “Sends Authorization: Bearer” authentication hint.
+Messages uses `x-api-key` and `anthropic-version: 2023-06-01`; selecting the
+Anthropic preset fills its base, environment key reference and Messages protocol.
+The model discovery URLs remain `/v1/models` with `/models` fallback for every
+protocol; Messages changes their authentication headers only.
+
 ### Structured configuration
 
 chat2api exposes Server and Models; file-bridge exposes Save Location & Server. Create from Example starts an unsaved draft when a structured config is missing. Review Changes shows the local saved-to-draft diff. Save Config Only validates and writes; Save and Restart requests a supervisor restart only after the save commits. A restart failure keeps the saved configuration and is reported separately.
