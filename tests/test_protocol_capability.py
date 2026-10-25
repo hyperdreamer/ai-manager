@@ -1,10 +1,14 @@
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -371,3 +375,548 @@ def test_unknown_app_id_is_unverifiable(tmp_path):
     assert result.status is pc.ProtocolSupportStatus.UNVERIFIABLE
     assert result.accepted == frozenset()
     assert result.detail == "No protocol probe is defined for unknown."
+
+
+SUPERSEDED_DETAIL = (
+    "Protocol capability check was superseded; retry after the restart or update."
+)
+SUPPORTED = pc.ProtocolSupport(pc.ProtocolSupportStatus.SUPPORTED, ENDPOINT_VALUES)
+PARTIAL = pc.ProtocolSupport(pc.ProtocolSupportStatus.PARTIAL, frozenset({VALUES[0]}))
+
+
+@pytest.fixture
+def cache_app(tmp_path, monkeypatch):
+    meta = meta_for(tmp_path)
+    interpreter = tmp_path / "environment" / "bin" / "python"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"fixture interpreter\n")
+    interpreter.chmod(0o755)
+    monkeypatch.setattr(pc, "resolve_app_interpreter", Mock(return_value=interpreter))
+    run = Mock(return_value=SUPPORTED)
+    monkeypatch.setattr(pc, "_run_uncached_probe", run)
+    pc.invalidate_protocol_support(meta.id)
+    return meta, interpreter, run
+
+
+def assert_superseded(result):
+    assert result.status is pc.ProtocolSupportStatus.UNVERIFIABLE
+    assert result.accepted == frozenset()
+    assert result.detail == SUPERSEDED_DETAIL
+
+
+def test_content_key_misses_equal_size_same_mtime_replacement(cache_app):
+    meta, _, run = cache_app
+    source = meta.relative_path / "config.py"
+    source.write_bytes(b"first\n")
+    old = source.stat()
+    assert pc.probe_protocol_support(meta).accepted == ENDPOINT_VALUES
+    pc.probe_protocol_support(meta)
+    assert run.call_count == 1
+    source.write_bytes(b"other\n")
+    os.utime(source, ns=(old.st_atime_ns, old.st_mtime_ns))
+    pc.probe_protocol_support(meta)
+    assert run.call_count == 2
+    latest = source.stat()
+    os.utime(source, ns=(latest.st_atime_ns, latest.st_mtime_ns + 10_000))
+    pc.probe_protocol_support(meta)
+    assert run.call_count == 2
+    source.write_bytes(b"changed contents and size\n")
+    pc.probe_protocol_support(meta)
+    assert run.call_count == 3
+
+
+@pytest.mark.parametrize("count,want_runs", [(200, 1), (201, 2)])
+def test_exact_threshold_and_overflow_never_cache(cache_app, count, want_runs):
+    meta, _, run = cache_app
+    for n in range(count):
+        (meta.relative_path / f"m{n:03}.py").write_text("pass\n")
+    pc.probe_protocol_support(meta)
+    pc.probe_protocol_support(meta)
+    assert run.call_count == want_runs
+
+
+def test_growing_cached_tree_past_threshold_skips_lookup_and_insertion(cache_app):
+    meta, _, run = cache_app
+    (meta.relative_path / "config.py").write_text("pass\n")
+    pc.probe_protocol_support(meta)
+    pc.probe_protocol_support(meta)
+    assert run.call_count == 1
+    for n in range(200):
+        (meta.relative_path / f"m{n:03}.py").write_text("pass\n")
+    assert pc.probe_protocol_support(meta) == SUPPORTED
+    assert pc.probe_protocol_support(meta) == SUPPORTED
+    assert run.call_count == 3
+
+
+def test_use_cache_false_bypasses_lookup_and_cannot_overwrite_cached_answer(cache_app):
+    meta, _, run = cache_app
+    assert pc.probe_protocol_support(meta) == SUPPORTED
+    run.return_value = PARTIAL
+    assert pc.probe_protocol_support(meta, use_cache=False) == PARTIAL
+    assert pc.probe_protocol_support(meta, use_cache=False) == PARTIAL
+    assert run.call_count == 3
+    assert pc.probe_protocol_support(meta) == SUPPORTED
+    assert run.call_count == 3
+
+
+def test_complete_key_unknown_can_cache_and_recover_after_invalidation(cache_app):
+    meta, _, run = cache_app
+    unknown = pc._unknown("Could not run protocol capability check: fixture failure")
+    run.return_value = unknown
+    assert pc.probe_protocol_support(meta) == unknown
+    assert pc.probe_protocol_support(meta) == unknown
+    assert run.call_count == 1
+    pc.invalidate_protocol_support(meta.id)
+    run.return_value = PARTIAL
+    assert pc.probe_protocol_support(meta) == PARTIAL
+    assert run.call_count == 2
+
+
+def test_interpreter_mtime_is_part_of_full_key(cache_app):
+    meta, interpreter, run = cache_app
+    pc.probe_protocol_support(meta)
+    pc.probe_protocol_support(meta)
+    assert run.call_count == 1
+    old = interpreter.stat()
+    os.utime(interpreter, ns=(old.st_atime_ns, old.st_mtime_ns + 10_000))
+    assert pc.probe_protocol_support(meta) == SUPPORTED
+    assert interpreter.read_bytes() == b"fixture interpreter\n"
+    assert run.call_count == 2
+
+
+def test_lexical_interpreter_path_keys_cache_and_is_passed_to_child(cache_app, monkeypatch):
+    meta, interpreter, run = cache_app
+    first = interpreter.parent / "first-python"
+    second = interpreter.parent / "second-python"
+    first.symlink_to(interpreter)
+    second.symlink_to(interpreter)
+    monkeypatch.setattr(pc, "resolve_app_interpreter", lambda path: first)
+    pc.probe_protocol_support(meta)
+    assert run.call_args.args == (meta, first, meta.relative_path.resolve())
+    monkeypatch.setattr(pc, "resolve_app_interpreter", lambda path: second)
+    pc.probe_protocol_support(meta)
+    assert run.call_count == 2
+    assert run.call_args.args == (meta, second, meta.relative_path.resolve())
+    pc.probe_protocol_support(meta)
+    assert run.call_count == 2
+
+
+def test_resolved_launch_directory_and_original_resolver_argument(cache_app, monkeypatch):
+    meta, interpreter, run = cache_app
+    lexical = meta.relative_path.parent / "launch-link"
+    lexical.symlink_to(meta.relative_path, target_is_directory=True)
+    meta = meta.model_copy(update={"relative_path": lexical})
+    resolver = Mock(return_value=interpreter)
+    monkeypatch.setattr(pc, "resolve_app_interpreter", resolver)
+    assert pc.probe_protocol_support(meta) == SUPPORTED
+    assert resolver.call_args.args == (lexical,)
+    assert run.call_args.args == (meta, interpreter, lexical.resolve())
+
+
+@pytest.mark.parametrize(
+    "selectable,app_id,status,detail",
+    [
+        (False, "ai-grammar", pc.ProtocolSupportStatus.UNSUPPORTED,
+         "Protocol selection is not available for this application."),
+        (True, "unknown", pc.ProtocolSupportStatus.UNVERIFIABLE,
+         "No protocol probe is defined for unknown."),
+    ],
+)
+def test_ineligible_metadata_never_resolves_scans_or_runs(
+    cache_app, monkeypatch, selectable, app_id, status, detail
+):
+    meta, _, run = cache_app
+    meta = meta.model_copy(update={"id": app_id, "supports_protocol_selection": selectable})
+    fingerprint = Mock(return_value=("full", b"f" * 32))
+    monkeypatch.setattr(pc, "source_fingerprint", fingerprint)
+    result = pc.probe_protocol_support(meta)
+    assert result.status is status
+    assert result.accepted == frozenset()
+    assert result.detail == detail
+    assert pc.resolve_app_interpreter.call_count == 0
+    assert fingerprint.call_count == 0
+    assert run.call_count == 0
+
+
+def test_source_fingerprint_hashes_exact_sorted_posix_stream(tmp_path, monkeypatch):
+    (tmp_path / "nested").mkdir()
+    sources = {
+        "z.py": b"last\x00bytes\n",
+        "nested/\u03b2.py": b"middle\r\n",
+        "a.py": b"first\n",
+    }
+    for relative, content in sources.items():
+        (tmp_path / relative).write_bytes(content)
+    for name in (".env", "config.yaml", "credentials.json", "settings.toml"):
+        (tmp_path / name).write_text("api_key=never-read-me\n")
+    read_bytes = Path.read_bytes
+    reads = []
+
+    def python_only(path):
+        assert path.suffix == ".py", f"fingerprint read unrelated content: {path}"
+        reads.append(path.relative_to(tmp_path).as_posix())
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", python_only)
+    stream = (
+        b"a.py\0" + hashlib.sha256(b"first\n").hexdigest().encode("ascii") + b"\n"
+        + "nested/\u03b2.py\0".encode("utf-8")
+        + hashlib.sha256(b"middle\r\n").hexdigest().encode("ascii") + b"\n"
+        + b"z.py\0" + hashlib.sha256(b"last\x00bytes\n").hexdigest().encode("ascii") + b"\n"
+    )
+    assert pc.source_fingerprint(tmp_path) == ("full", hashlib.sha256(stream).digest())
+    assert reads == ["a.py", "nested/\u03b2.py", "z.py"]
+
+
+def test_source_exclusions_ignore_virtualenvs_cache_and_directory_symlinks(
+    tmp_path, monkeypatch
+):
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    visible = app_dir / "visible.py"
+    visible.write_bytes(b"visible\n")
+    excluded = []
+    for name in ("__pycache__", ".venv", "venv", "custom-environment"):
+        directory = app_dir / "nested" / name
+        directory.mkdir(parents=True)
+        excluded.append(directory / "hidden.py")
+    (app_dir / "nested/custom-environment/pyvenv.cfg").write_text("never read marker\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    excluded.append(outside / "hidden.py")
+    (app_dir / "linked-directory").symlink_to(outside, target_is_directory=True)
+    for path in excluded:
+        path.write_bytes(b"excluded\n")
+    read_bytes = Path.read_bytes
+
+    def visible_only(path):
+        assert path == visible, f"fingerprint read excluded content: {path}"
+        return read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", visible_only)
+    stream = b"visible.py\0" + hashlib.sha256(b"visible\n").hexdigest().encode("ascii") + b"\n"
+    expected = ("full", hashlib.sha256(stream).digest())
+    assert pc.source_fingerprint(app_dir) == expected
+    for path in excluded:
+        path.write_bytes(b"different excluded contents\n")
+        path.with_name("another.py").write_bytes(b"new excluded source\n")
+    assert pc.source_fingerprint(app_dir) == expected
+    visible.write_bytes(b"changed\n")
+    assert pc.source_fingerprint(app_dir) != expected
+
+
+def test_nonregular_virtualenv_marker_does_not_exclude_sources(tmp_path):
+    directory = tmp_path / "normal"
+    directory.mkdir()
+    (directory / "pyvenv.cfg").mkdir()
+    (directory / "code.py").write_bytes(b"pass\n")
+    stream = b"normal/code.py\0" + hashlib.sha256(b"pass\n").hexdigest().encode("ascii") + b"\n"
+    assert pc.source_fingerprint(tmp_path) == ("full", hashlib.sha256(stream).digest())
+
+
+def test_python_leaf_symlink_hashes_regular_target_bytes_only(tmp_path):
+    app_dir = tmp_path / "app"
+    app_dir.mkdir()
+    target = tmp_path / "external-source.txt"
+    target.write_bytes(b"first\n")
+    (app_dir / "alias.py").symlink_to(target)
+    os.mkfifo(app_dir / "pipe.py")
+    (app_dir / "pipe-link.py").symlink_to(app_dir / "pipe.py")
+    (app_dir / "directory.py").symlink_to(tmp_path / "empty-dir", target_is_directory=True)
+    (tmp_path / "empty-dir").mkdir()
+    first_stream = b"alias.py\0" + hashlib.sha256(b"first\n").hexdigest().encode("ascii") + b"\n"
+    expected = ("full", hashlib.sha256(first_stream).digest())
+    assert pc.source_fingerprint(app_dir) == expected
+    old = target.stat()
+    target.write_bytes(b"other\n")
+    os.utime(target, ns=(old.st_atime_ns, old.st_mtime_ns))
+    assert pc.source_fingerprint(app_dir) != expected
+
+
+@pytest.mark.parametrize("mtime_base", [1_700_000_000_000_000_000, -2_000_000_000])
+def test_overflow_reports_full_set_metadata_without_reading_source_contents(
+    tmp_path, monkeypatch, mtime_base
+):
+    for n in range(201):
+        path = tmp_path / f"m{n:03}.py"
+        path.write_text("pass\n")
+        os.utime(path, ns=(mtime_base + n, mtime_base + n))
+    directory_mtime = tmp_path.stat().st_mtime_ns
+    reads = Mock(side_effect=AssertionError("overflow must not read file contents"))
+    monkeypatch.setattr(Path, "read_bytes", reads)
+    assert pc.source_fingerprint(tmp_path) == (
+        "coarse", 201, mtime_base + 200, directory_mtime
+    )
+    assert reads.call_count == 0
+
+
+@pytest.mark.parametrize(
+    "stage",
+    ["resolver", "interpreter_stat", "read", "iteration", "directory_lstat",
+     "marker_stat", "source_lstat", "symlink_stat"],
+)
+def test_preparation_failures_are_redacted_unknown_and_never_cached(
+    cache_app, monkeypatch, stage
+):
+    meta, interpreter, run = cache_app
+    source = meta.relative_path / "config.py"
+    source.write_text("pass\n")
+    directory = meta.relative_path / "nested"
+    directory.mkdir()
+    (directory / "code.py").write_text("pass\n")
+    marker = directory / "pyvenv.cfg"
+    link = meta.relative_path / "alias.py"
+    link.symlink_to(source)
+    failure = PermissionError("api_key=preparation-secret")
+    with monkeypatch.context() as patch:
+        if stage == "resolver":
+            patch.setattr(pc, "resolve_app_interpreter", Mock(side_effect=failure))
+        elif stage == "read":
+            original = Path.read_bytes
+
+            def fail_read(path):
+                if path == source:
+                    raise failure
+                return original(path)
+
+            patch.setattr(Path, "read_bytes", fail_read)
+        elif stage == "iteration":
+            def fail_walk(top, *, followlinks, onerror):
+                onerror(failure)
+                yield from ()  # a suppressed walk error must end enumeration normally
+
+            patch.setattr(pc.os, "walk", fail_walk)
+        elif stage in ("directory_lstat", "source_lstat"):
+            original = Path.lstat
+            failing_path = directory if stage == "directory_lstat" else source
+
+            def fail_lstat(path):
+                if path == failing_path:
+                    raise failure
+                return original(path)
+
+            patch.setattr(Path, "lstat", fail_lstat)
+        else:
+            original = Path.stat
+            failing_path = {
+                "interpreter_stat": interpreter, "marker_stat": marker, "symlink_stat": link
+            }[stage]
+
+            def fail_stat(path, **kwargs):
+                if path == failing_path and kwargs.get("follow_symlinks", True):
+                    raise failure
+                return original(path, **kwargs)
+
+            patch.setattr(Path, "stat", fail_stat)
+        for _ in range(2):
+            result = pc.probe_protocol_support(meta)
+            assert result.status is pc.ProtocolSupportStatus.UNVERIFIABLE
+            assert result.accepted == frozenset()
+            assert result.detail.startswith("Protocol capability check could not be prepared:")
+            assert "preparation-secret" not in result.detail
+        assert run.call_count == 0
+    assert pc.probe_protocol_support(meta) == SUPPORTED
+    assert pc.probe_protocol_support(meta) == SUPPORTED
+    assert run.call_count == 1
+
+
+def test_dangling_python_symlink_is_unverifiable_without_cached_acceptance(cache_app):
+    meta, _, run = cache_app
+    link = meta.relative_path / "broken.py"
+    link.symlink_to(meta.relative_path / "missing-source")
+    for _ in range(2):
+        result = pc.probe_protocol_support(meta)
+        assert result.status is pc.ProtocolSupportStatus.UNVERIFIABLE
+        assert result.accepted == frozenset()
+    assert run.call_count == 0
+    link.unlink()
+    assert pc.probe_protocol_support(meta) == SUPPORTED
+    assert run.call_count == 1
+
+
+def test_second_identity_failure_does_not_publish_or_cache_old_result(cache_app, monkeypatch):
+    meta, _, run = cache_app
+    original = pc.source_fingerprint
+    calls = 0
+
+    def fail_second_scan(app_dir):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("api_key=second-scan-secret")
+        return original(app_dir)
+
+    monkeypatch.setattr(pc, "source_fingerprint", fail_second_scan)
+    result = pc.probe_protocol_support(meta)
+    assert result.status is pc.ProtocolSupportStatus.UNVERIFIABLE
+    assert result.accepted == frozenset()
+    assert result.detail.startswith("Protocol capability check could not be prepared:")
+    assert "second-scan-secret" not in result.detail
+    assert run.call_count == 1
+    run.return_value = PARTIAL
+    assert pc.probe_protocol_support(meta) == PARTIAL
+    assert pc.probe_protocol_support(meta) == PARTIAL
+    assert run.call_count == 2
+
+
+def test_unexpected_execution_failure_becomes_redacted_unknown(cache_app):
+    meta, _, run = cache_app
+    run.side_effect = RuntimeError("api_key=worker-secret")
+    result = pc.probe_protocol_support(meta)
+    assert result.status is pc.ProtocolSupportStatus.UNVERIFIABLE
+    assert result.accepted == frozenset()
+    assert result.detail.startswith("Protocol capability check failed:")
+    assert "worker-secret" not in result.detail
+
+
+def test_generations_start_zero_and_invalidation_is_per_app(tmp_path):
+    app_id = f"unseen-{tmp_path.name}"
+    unrelated = f"unrelated-{tmp_path.name}"
+    assert pc.protocol_support_generation(app_id) == 0
+    assert pc.protocol_support_generation(unrelated) == 0
+    pc.invalidate_protocol_support(app_id)
+    assert pc.protocol_support_generation(app_id) == 1
+    assert pc.protocol_support_generation(unrelated) == 0
+    pc.invalidate_protocol_support(app_id)
+    assert pc.protocol_support_generation(app_id) == 2
+
+
+def test_invalidation_evicts_every_key_for_app_and_preserves_other_apps(cache_app):
+    meta, _, run = cache_app
+    other = meta.model_copy(update={"id": "textkit"})
+    pc.invalidate_protocol_support(other.id)
+    source = meta.relative_path / "config.py"
+    source.write_bytes(b"first\n")
+    pc.probe_protocol_support(meta)
+    source.write_bytes(b"other\n")
+    pc.probe_protocol_support(meta)
+    pc.probe_protocol_support(other)
+    assert run.call_count == 3
+    before = pc.protocol_support_generation(meta.id)
+    pc.invalidate_protocol_support(meta.id)
+    assert pc.protocol_support_generation(meta.id) == before + 1
+    assert pc.probe_protocol_support(other) == SUPPORTED
+    assert run.call_count == 3
+    pc.probe_protocol_support(meta)
+    source.write_bytes(b"first\n")
+    pc.probe_protocol_support(meta)
+    assert run.call_count == 5
+
+
+@pytest.mark.parametrize("use_cache", [True, False])
+def test_old_generation_cannot_publish_over_new_result(cache_app, use_cache):
+    meta, _, run = cache_app
+    started = threading.Event()
+    release = threading.Event()
+
+    def execute_probe(*args):
+        if run.call_count == 1:
+            started.set()
+            assert release.wait(2), "old probe was never released"
+            return SUPPORTED
+        return PARTIAL
+
+    run.side_effect = execute_probe
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        old = pool.submit(pc.probe_protocol_support, meta, use_cache=use_cache)
+        try:
+            assert started.wait(2), "old probe never started"
+            invalidation = pool.submit(pc.invalidate_protocol_support, meta.id)
+            assert invalidation.result(timeout=2) is None
+            assert not old.done(), "invalidation waited for the blocked probe"
+            fresh = pool.submit(pc.probe_protocol_support, meta).result(timeout=2)
+            assert fresh == PARTIAL
+        finally:
+            release.set()
+        old_result = old.result(timeout=2)
+    assert_superseded(old_result)
+    assert pc.probe_protocol_support(meta) == PARTIAL
+    assert run.call_count == 2
+
+
+@pytest.mark.parametrize("change", ["source", "interpreter_mtime", "activation"])
+def test_identity_changed_during_probe_cannot_publish(cache_app, monkeypatch, change):
+    meta, interpreter, run = cache_app
+    source = meta.relative_path / "config.py"
+    source.write_bytes(b"first\n")
+    old_stat = source.stat()
+    started = threading.Event()
+    release = threading.Event()
+
+    def execute_probe(*args):
+        if run.call_count == 1:
+            started.set()
+            assert release.wait(2), "probe was never released"
+            return SUPPORTED
+        return PARTIAL
+
+    run.side_effect = execute_probe
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(pc.probe_protocol_support, meta)
+        try:
+            assert started.wait(2), "probe never started"
+            if change == "source":
+                source.write_bytes(b"other\n")
+                os.utime(source, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+            elif change == "interpreter_mtime":
+                old = interpreter.stat()
+                os.utime(interpreter, ns=(old.st_atime_ns, old.st_mtime_ns + 10_000))
+            else:
+                alternate = interpreter.parent / "other-python"
+                alternate.symlink_to(interpreter)
+                monkeypatch.setattr(pc, "resolve_app_interpreter", lambda path: alternate)
+        finally:
+            release.set()
+        result = future.result(timeout=2)
+    assert_superseded(result)
+    assert pc.probe_protocol_support(meta) == PARTIAL
+    assert pc.probe_protocol_support(meta) == PARTIAL
+    assert run.call_count == 2
+
+
+def test_queued_obsolete_generation_never_resolves_or_spawns(cache_app, monkeypatch):
+    meta, _, run = cache_app
+    generation = pc.protocol_support_generation(meta.id)
+    pc.invalidate_protocol_support(meta.id)
+    fingerprint = Mock(return_value=("full", b"f" * 32))
+    monkeypatch.setattr(pc, "source_fingerprint", fingerprint)
+    result = pc._probe_protocol_support_at_generation(meta, generation=generation)
+    assert_superseded(result)
+    assert pc.resolve_app_interpreter.call_count == 0
+    assert fingerprint.call_count == 0
+    assert run.call_count == 0
+
+
+def test_invalidation_during_cache_hit_scan_rejects_cached_answer(cache_app, monkeypatch):
+    meta, _, run = cache_app
+    pc.probe_protocol_support(meta)
+    pc.probe_protocol_support(meta)
+    assert run.call_count == 1
+    original = pc.source_fingerprint
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_fingerprint(app_dir):
+        if not started.is_set():
+            started.set()
+            assert release.wait(2), "cache-hit scan was never released"
+        return original(app_dir)
+
+    monkeypatch.setattr(pc, "source_fingerprint", blocked_fingerprint)
+    run.return_value = PARTIAL
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future = pool.submit(pc.probe_protocol_support, meta)
+        try:
+            assert started.wait(2), "cache-hit scan never started"
+            invalidation = pool.submit(pc.invalidate_protocol_support, meta.id)
+            assert invalidation.result(timeout=2) is None
+            assert not future.done(), "invalidation waited for the blocked scan"
+            # Refill the identical key in the new generation before the old lookup.
+            fresh = pool.submit(pc.probe_protocol_support, meta).result(timeout=2)
+            assert fresh == PARTIAL
+        finally:
+            release.set()
+        result = future.result(timeout=2)
+    assert_superseded(result)
+    assert pc.probe_protocol_support(meta) == PARTIAL
+    assert run.call_count == 2

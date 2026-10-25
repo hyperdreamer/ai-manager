@@ -1,17 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 import secrets
+import stat
 import subprocess
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 from ai_manager.config.models import AppMetadata
 from ai_manager.config.protocols import ENDPOINT_VALUES
+from ai_manager.services.app_interpreter import resolve_app_interpreter
 from ai_manager.services.launcher_gate import redact_diagnostics
 
 
@@ -282,3 +286,147 @@ def _run_uncached_probe(
     else:
         status = ProtocolSupportStatus.UNSUPPORTED
     return ProtocolSupport(status, accepted, _redact_probe_detail(stderr.strip()))
+
+
+Fingerprint = tuple[Literal["full"], bytes] | tuple[Literal["coarse"], int, int, int]
+_CacheKey = tuple[str, str, int, Fingerprint]
+_EXCLUDED_DIRECTORIES: Final[frozenset[str]] = frozenset({"__pycache__", ".venv", "venv"})
+SUPERSEDED: Final[str] = (
+    "Protocol capability check was superseded; retry after the restart or update."
+)
+_lock = threading.Lock()
+_cache: dict[_CacheKey, ProtocolSupport] = {}
+_generations: dict[str, int] = {}
+
+
+def source_fingerprint(app_dir: Path) -> Fingerprint:
+    """Hash only Python sources; overflow metadata is never cache authority."""
+    files: list[tuple[str, Path]] = []
+    newest_file_mtime_ns: int | None = None
+
+    def raise_scan_error(error: OSError) -> None:
+        raise error
+
+    for directory, subdirectories, filenames in os.walk(
+        app_dir, followlinks=False, onerror=raise_scan_error
+    ):
+        root = Path(directory)
+        try:
+            marker = (root / "pyvenv.cfg").stat()
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISREG(marker.st_mode):
+                subdirectories.clear()
+                continue
+
+        included_directories = []
+        for name in subdirectories:
+            entry = (root / name).lstat()
+            if name not in _EXCLUDED_DIRECTORIES and stat.S_ISDIR(entry.st_mode):
+                included_directories.append(name)
+        subdirectories[:] = included_directories
+
+        for name in filenames:
+            if not name.endswith(".py"):
+                continue
+            path = root / name
+            entry = path.lstat()
+            if stat.S_ISLNK(entry.st_mode):
+                entry = path.stat()
+            if stat.S_ISREG(entry.st_mode):
+                files.append((path.relative_to(app_dir).as_posix(), path))
+                newest_file_mtime_ns = (
+                    entry.st_mtime_ns if newest_file_mtime_ns is None
+                    else max(newest_file_mtime_ns, entry.st_mtime_ns)
+                )
+
+    if len(files) > 200:
+        assert newest_file_mtime_ns is not None
+        return ("coarse", len(files), newest_file_mtime_ns, app_dir.stat().st_mtime_ns)
+    hasher = hashlib.sha256()
+    for relative, path in sorted(files, key=lambda entry: entry[0]):
+        hasher.update(relative.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(hashlib.sha256(path.read_bytes()).hexdigest().encode("ascii"))
+        hasher.update(b"\n")
+    return ("full", hasher.digest())
+
+
+def protocol_support_generation(app_id: str) -> int:
+    with _lock:
+        return _generations.get(app_id, 0)
+
+
+def invalidate_protocol_support(app_id: str) -> None:
+    with _lock:
+        _generations[app_id] = _generations.get(app_id, 0) + 1
+        for key in tuple(_cache):
+            if key[0] == app_id:
+                del _cache[key]
+
+
+def _probe_identity(meta: AppMetadata) -> tuple[Path, Path, _CacheKey]:
+    interpreter = resolve_app_interpreter(meta.relative_path)
+    app_dir = meta.relative_path.resolve()
+    key = (
+        meta.id,
+        str(interpreter),
+        interpreter.stat().st_mtime_ns,
+        source_fingerprint(app_dir),
+    )
+    return interpreter, app_dir, key
+
+
+def probe_protocol_support(
+    meta: AppMetadata, *, use_cache: bool = True
+) -> ProtocolSupport:
+    generation = protocol_support_generation(meta.id)
+    return _probe_protocol_support_at_generation(
+        meta, generation=generation, use_cache=use_cache
+    )
+
+
+def _probe_protocol_support_at_generation(
+    meta: AppMetadata, *, generation: int, use_cache: bool = True
+) -> ProtocolSupport:
+    if not meta.supports_protocol_selection:
+        return ProtocolSupport(
+            ProtocolSupportStatus.UNSUPPORTED,
+            detail="Protocol selection is not available for this application.",
+        )
+    if meta.id not in _PROGRAMS:
+        return _unknown(f"No protocol probe is defined for {meta.id}.")
+    with _lock:
+        if generation != _generations.get(meta.id, 0):
+            return _unknown(SUPERSEDED)
+    try:
+        interpreter, app_dir, key = _probe_identity(meta)
+    except Exception as exc:
+        return _unknown(f"Protocol capability check could not be prepared: {exc}")
+
+    cacheable = use_cache and key[3][0] == "full"
+    with _lock:
+        if generation != _generations.get(meta.id, 0):
+            return _unknown(SUPERSEDED)
+        if cacheable:
+            cached = _cache.get(key)
+            if cached is not None:
+                return cached
+
+    try:
+        result = _run_uncached_probe(meta, interpreter, app_dir)
+    except Exception as exc:
+        result = _unknown(f"Protocol capability check failed: {exc}")
+    try:
+        _, _, current_key = _probe_identity(meta)
+    except Exception as exc:
+        return _unknown(f"Protocol capability check could not be prepared: {exc}")
+    if current_key != key:
+        return _unknown(SUPERSEDED)
+    with _lock:
+        if generation != _generations.get(meta.id, 0):
+            return _unknown(SUPERSEDED)
+        if cacheable:
+            _cache[key] = result
+        return result
