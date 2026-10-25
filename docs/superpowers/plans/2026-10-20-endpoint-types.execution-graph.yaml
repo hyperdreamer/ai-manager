@@ -3,365 +3,263 @@
 source_plan:
   path: docs/superpowers/plans/2026-10-20-endpoint-types.md
   sha256: 1495c3e47a71660ca3fbbb905c340272c4c2ab80e90e4722bfed076a8231e42c
-  commit_oid: ee08b098ade541a19048d39e94872730811f1ce2
+  commit_oid: 0c581069cfe1805a60ec46b9fbd9016c4a101029
 topic_slug: endpoint-types
 epoch: 1
 repositories:
   ai-manager: /data/home/guest/Development/ai/ai-manager
 lanes:
-- id: core
-  owns:
-  - src/ai_manager/config/protocols.py
-  - src/ai_manager/config/models.py
-  - src/ai_manager/config/app_registry.py
-  - src/ai_manager/config/yaml_manager.py
-  - src/ai_manager/config/config_errors.py
-  - src/ai_manager/config/transaction.py
-  - src/ai_manager/config/blast_radius.py
-  - src/ai_manager/config/structured_config.py
-  - tests/endpoint_helpers.py
-  - tests/test_protocols.py
-  - tests/test_models.py
-  - tests/test_app_registry.py
-  - tests/test_yaml_manager.py
-  - tests/test_blast_radius.py
-  - tests/test_transaction.py
-  task_ids:
-  - T-001
-  - T-002
-  - T-003
-  - T-004
-- id: probe
-  owns:
-  - src/ai_manager/services/protocol_capability.py
-  - tests/test_protocol_capability.py
-  task_ids:
-  - T-005
-  - T-006
-- id: ui
-  owns:
-  - src/ai_manager/ui/app_detail_view.py
-  - src/ai_manager/ui/main_window.py
-  - src/ai_manager/services/config_jobs.py
-  - src/ai_manager/services/supervisor.py
-  - src/ai_manager/config/presets.py
-  - src/ai_manager/services/model_fetcher.py
-  - src/ai_manager/config/structured_models.py
-  - src/ai_manager/config/structured_config.py
-  - tests/conftest.py
-  - tests/test_app_views.py
-  - tests/test_endpoint_main_window.py
-  - tests/test_mnemonic.py
-  - tests/test_supervisor.py
-  - tests/test_structured_main_window.py
-  - tests/test_validator_orchestration.py
-  - tests/test_model_fetcher.py
-  - tests/test_presets.py
-  - tests/test_structured_config.py
-  task_ids:
-  - T-007
-  - T-008
-  - T-009
-  - T-010
-  - T-011
-  - T-012
-  - T-013
-- id: docs
-  owns:
-  - README.md
-  task_ids:
-  - T-014
+  - id: core
+    owns: ["src/ai_manager/config/protocols.py", "src/ai_manager/config/models.py", "src/ai_manager/config/app_registry.py", "src/ai_manager/config/yaml_manager.py", "src/ai_manager/config/config_errors.py", "src/ai_manager/config/transaction.py", "src/ai_manager/config/blast_radius.py", "src/ai_manager/config/structured_config.py", "tests/endpoint_helpers.py", "tests/test_protocols.py", "tests/test_models.py", "tests/test_app_registry.py", "tests/test_yaml_manager.py", "tests/test_blast_radius.py", "tests/test_transaction.py"]
+    task_ids: [T-001, T-002, T-003, T-004]
+  - id: probe
+    owns: ["src/ai_manager/services/protocol_capability.py", "tests/test_protocol_capability.py"]
+    task_ids: [T-005, T-006]
+  - id: ui
+    owns: ["src/ai_manager/ui/app_detail_view.py", "src/ai_manager/ui/main_window.py", "src/ai_manager/services/config_jobs.py", "src/ai_manager/services/supervisor.py", "src/ai_manager/config/presets.py", "src/ai_manager/services/model_fetcher.py", "src/ai_manager/config/structured_models.py", "src/ai_manager/config/structured_config.py", "tests/conftest.py", "tests/test_app_views.py", "tests/test_endpoint_main_window.py", "tests/test_mnemonic.py", "tests/test_supervisor.py", "tests/test_structured_main_window.py", "tests/test_validator_orchestration.py", "tests/test_model_fetcher.py", "tests/test_presets.py", "tests/test_structured_config.py"]
+    task_ids: [T-007, T-008, T-009, T-010, T-011, T-012, T-013]
+  - id: docs
+    owns: ["README.md"]
+    task_ids: [T-014]
 tasks:
-- id: T-001
-  plan_task: 1
-  title: Define the protocol vocabulary and exact URL helpers
-  tier: standard
-  repository: ai-manager
-  lane: core
-  sequence: 1
-  depends_on: []
-  owns:
-  - src/ai_manager/config/protocols.py
-  - tests/test_protocols.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: &id001
-  - argv:
-    - /data/home/guest/anaconda3/envs/daily/bin/python3
-    - -m
-    - pytest
-    - tests/
-    - -q
-    cwd: .
-    env:
-      QT_QPA_PLATFORM: offscreen
-      PYTHONPATH: src
-    timeout_seconds: 1800
-- id: T-002
-  plan_task: 2
-  title: Add canonical endpoint models, snapshots and registry ownership
-  tier: advanced
-  repository: ai-manager
-  lane: core
-  sequence: 2
-  depends_on:
-  - T-001
-  owns:
-  - src/ai_manager/config/app_registry.py
-  - src/ai_manager/config/models.py
-  - tests/endpoint_helpers.py
-  - tests/test_app_registry.py
-  - tests/test_models.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
-- id: T-003
-  plan_task: 3
-  title: Read coherent metadata-aware LLM snapshots without creating files
-  tier: advanced
-  repository: ai-manager
-  lane: core
-  sequence: 3
-  depends_on:
-  - T-002
-  owns:
-  - src/ai_manager/config/blast_radius.py
-  - src/ai_manager/config/structured_config.py
-  - src/ai_manager/config/yaml_manager.py
-  - tests/test_blast_radius.py
-  - tests/test_yaml_manager.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
-- id: T-004
-  plan_task: 4
-  title: Implement diff-only writers and distinguish committed cleanup failure
-  tier: capable
-  repository: ai-manager
-  lane: core
-  sequence: 4
-  depends_on:
-  - T-003
-  owns:
-  - src/ai_manager/config/config_errors.py
-  - src/ai_manager/config/transaction.py
-  - src/ai_manager/config/yaml_manager.py
-  - tests/test_app_registry.py
-  - tests/test_transaction.py
-  - tests/test_yaml_manager.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
-- id: T-005
-  plan_task: 5
-  title: Execute authenticated installed-build protocol probes
-  tier: capable
-  repository: ai-manager
-  lane: probe
-  sequence: 1
-  depends_on: []
-  owns:
-  - src/ai_manager/services/protocol_capability.py
-  - tests/test_protocol_capability.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
-- id: T-006
-  plan_task: 6
-  title: Cache capabilities by content and guard every generation
-  tier: capable
-  repository: ai-manager
-  lane: probe
-  sequence: 2
-  depends_on:
-  - T-005
-  owns:
-  - src/ai_manager/services/protocol_capability.py
-  - tests/test_protocol_capability.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
-- id: T-007
-  plan_task: 7
-  title: Present snapshot-owned protocol controls and fail closed on load
-  tier: capable
-  repository: ai-manager
-  lane: ui
-  sequence: 1
-  depends_on:
-  - T-004
-  - T-006
-  owns:
-  - src/ai_manager/ui/app_detail_view.py
-  - src/ai_manager/ui/main_window.py
-  - tests/conftest.py
-  - tests/test_app_views.py
-  - tests/test_endpoint_main_window.py
-  - tests/test_mnemonic.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
-- id: T-008
-  plan_task: 8
-  title: Deliver generation-bound jobs and complete restart attempts exactly once
-  tier: frontier
-  repository: ai-manager
-  lane: ui
-  sequence: 2
-  depends_on:
-  - T-004
-  - T-006
-  - T-007
-  owns:
-  - src/ai_manager/services/config_jobs.py
-  - src/ai_manager/services/supervisor.py
-  - src/ai_manager/ui/main_window.py
-  - tests/conftest.py
-  - tests/test_endpoint_main_window.py
-  - tests/test_supervisor.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
-- id: T-009
-  plan_task: 9
-  title: Enforce the ordered gate at the sole LLM commit seam
-  tier: frontier
-  repository: ai-manager
-  lane: ui
-  sequence: 3
-  depends_on:
-  - T-004
-  - T-006
-  - T-008
-  owns:
-  - src/ai_manager/ui/main_window.py
-  - tests/test_endpoint_main_window.py
-  - tests/test_transaction.py
-  - tests/test_yaml_manager.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
-- id: T-010
-  plan_task: 10
-  title: Reload LLM files without discarding drafts or entering structured recovery
-  tier: capable
-  repository: ai-manager
-  lane: ui
-  sequence: 4
-  depends_on:
-  - T-004
-  - T-006
-  - T-009
-  owns:
-  - src/ai_manager/ui/main_window.py
-  - tests/test_endpoint_main_window.py
-  - tests/test_structured_main_window.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
-- id: T-011
-  plan_task: 11
-  title: Rebase each managed field and retain cross-mode conflicts visibly
-  tier: capable
-  repository: ai-manager
-  lane: ui
-  sequence: 5
-  depends_on:
-  - T-004
-  - T-006
-  - T-010
-  owns:
-  - src/ai_manager/ui/app_detail_view.py
-  - tests/test_app_views.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
-- id: T-012
-  plan_task: 12
-  title: Reconcile path-valued dependent results from actual installed files
-  tier: frontier
-  repository: ai-manager
-  lane: ui
-  sequence: 6
-  depends_on:
-  - T-004
-  - T-006
-  - T-011
-  owns:
-  - src/ai_manager/config/structured_config.py
-  - src/ai_manager/config/structured_models.py
-  - src/ai_manager/ui/main_window.py
-  - tests/test_blast_radius.py
-  - tests/test_structured_config.py
-  - tests/test_structured_main_window.py
-  - tests/test_validator_orchestration.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
-- id: T-013
-  plan_task: 13
-  title: Apply typed presets and propagate the current endpoint through model discovery
-  tier: capable
-  repository: ai-manager
-  lane: ui
-  sequence: 7
-  depends_on:
-  - T-004
-  - T-006
-  - T-012
-  owns:
-  - src/ai_manager/config/presets.py
-  - src/ai_manager/services/model_fetcher.py
-  - src/ai_manager/ui/app_detail_view.py
-  - tests/test_app_views.py
-  - tests/test_endpoint_main_window.py
-  - tests/test_model_fetcher.py
-  - tests/test_presets.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
-- id: T-014
-  plan_task: 14
-  title: Document protocol scope and collect complete acceptance evidence
-  tier: advanced
-  repository: ai-manager
-  lane: docs
-  sequence: 1
-  depends_on:
-  - T-004
-  - T-006
-  - T-013
-  owns:
-  - tests/test_app_registry.py
-  - tests/test_app_views.py
-  - tests/test_blast_radius.py
-  - tests/test_endpoint_main_window.py
-  - tests/test_model_fetcher.py
-  - tests/test_models.py
-  - tests/test_presets.py
-  - tests/test_protocol_capability.py
-  - tests/test_protocols.py
-  - tests/test_structured_main_window.py
-  - tests/test_supervisor.py
-  - tests/test_transaction.py
-  - tests/test_yaml_manager.py
-  resources: []
-  produces: []
-  consumes: []
-  validation: *id001
+  - id: T-001
+    plan_task: 1
+    title: "Define the protocol vocabulary and exact URL helpers"
+    tier: standard
+    repository: ai-manager
+    lane: core
+    sequence: 1
+    depends_on: []
+    owns: ["src/ai_manager/config/protocols.py", "tests/test_protocols.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-002
+    plan_task: 2
+    title: "Add canonical endpoint models, snapshots and registry ownership"
+    tier: advanced
+    repository: ai-manager
+    lane: core
+    sequence: 2
+    depends_on: ["T-001"]
+    owns: ["src/ai_manager/config/app_registry.py", "src/ai_manager/config/models.py", "tests/endpoint_helpers.py", "tests/test_app_registry.py", "tests/test_models.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-003
+    plan_task: 3
+    title: "Read coherent metadata-aware LLM snapshots without creating files"
+    tier: advanced
+    repository: ai-manager
+    lane: core
+    sequence: 3
+    depends_on: ["T-002"]
+    owns: ["src/ai_manager/config/blast_radius.py", "src/ai_manager/config/structured_config.py", "src/ai_manager/config/yaml_manager.py", "tests/test_blast_radius.py", "tests/test_yaml_manager.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-004
+    plan_task: 4
+    title: "Implement diff-only writers and distinguish committed cleanup failure"
+    tier: capable
+    repository: ai-manager
+    lane: core
+    sequence: 4
+    depends_on: ["T-003"]
+    owns: ["src/ai_manager/config/config_errors.py", "src/ai_manager/config/transaction.py", "src/ai_manager/config/yaml_manager.py", "tests/test_app_registry.py", "tests/test_transaction.py", "tests/test_yaml_manager.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-005
+    plan_task: 5
+    title: "Execute authenticated installed-build protocol probes"
+    tier: capable
+    repository: ai-manager
+    lane: probe
+    sequence: 1
+    depends_on: []
+    owns: ["src/ai_manager/services/protocol_capability.py", "tests/test_protocol_capability.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-006
+    plan_task: 6
+    title: "Cache capabilities by content and guard every generation"
+    tier: capable
+    repository: ai-manager
+    lane: probe
+    sequence: 2
+    depends_on: ["T-005"]
+    owns: ["src/ai_manager/services/protocol_capability.py", "tests/test_protocol_capability.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-007
+    plan_task: 7
+    title: "Present snapshot-owned protocol controls and fail closed on load"
+    tier: capable
+    repository: ai-manager
+    lane: ui
+    sequence: 1
+    depends_on: ["T-004", "T-006"]
+    owns: ["src/ai_manager/ui/app_detail_view.py", "src/ai_manager/ui/main_window.py", "tests/conftest.py", "tests/test_app_views.py", "tests/test_endpoint_main_window.py", "tests/test_mnemonic.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-008
+    plan_task: 8
+    title: "Deliver generation-bound jobs and complete restart attempts exactly once"
+    tier: frontier
+    repository: ai-manager
+    lane: ui
+    sequence: 2
+    depends_on: ["T-004", "T-006", "T-007"]
+    owns: ["src/ai_manager/services/config_jobs.py", "src/ai_manager/services/supervisor.py", "src/ai_manager/ui/main_window.py", "tests/conftest.py", "tests/test_endpoint_main_window.py", "tests/test_supervisor.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-009
+    plan_task: 9
+    title: "Enforce the ordered gate at the sole LLM commit seam"
+    tier: frontier
+    repository: ai-manager
+    lane: ui
+    sequence: 3
+    depends_on: ["T-004", "T-006", "T-008"]
+    owns: ["src/ai_manager/ui/main_window.py", "tests/test_endpoint_main_window.py", "tests/test_transaction.py", "tests/test_yaml_manager.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-010
+    plan_task: 10
+    title: "Reload LLM files without discarding drafts or entering structured recovery"
+    tier: capable
+    repository: ai-manager
+    lane: ui
+    sequence: 4
+    depends_on: ["T-004", "T-006", "T-009"]
+    owns: ["src/ai_manager/ui/main_window.py", "tests/test_endpoint_main_window.py", "tests/test_structured_main_window.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-011
+    plan_task: 11
+    title: "Rebase each managed field and retain cross-mode conflicts visibly"
+    tier: capable
+    repository: ai-manager
+    lane: ui
+    sequence: 5
+    depends_on: ["T-004", "T-006", "T-010"]
+    owns: ["src/ai_manager/ui/app_detail_view.py", "tests/test_app_views.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-012
+    plan_task: 12
+    title: "Reconcile path-valued dependent results from actual installed files"
+    tier: frontier
+    repository: ai-manager
+    lane: ui
+    sequence: 6
+    depends_on: ["T-004", "T-006", "T-011"]
+    owns: ["src/ai_manager/config/structured_config.py", "src/ai_manager/config/structured_models.py", "src/ai_manager/ui/main_window.py", "tests/test_blast_radius.py", "tests/test_structured_config.py", "tests/test_structured_main_window.py", "tests/test_validator_orchestration.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-013
+    plan_task: 13
+    title: "Apply typed presets and propagate the current endpoint through model discovery"
+    tier: capable
+    repository: ai-manager
+    lane: ui
+    sequence: 7
+    depends_on: ["T-004", "T-006", "T-012"]
+    owns: ["src/ai_manager/config/presets.py", "src/ai_manager/services/model_fetcher.py", "src/ai_manager/ui/app_detail_view.py", "tests/test_app_views.py", "tests/test_endpoint_main_window.py", "tests/test_model_fetcher.py", "tests/test_presets.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
+  - id: T-014
+    plan_task: 14
+    title: "Document protocol scope and collect complete acceptance evidence"
+    tier: advanced
+    repository: ai-manager
+    lane: docs
+    sequence: 1
+    depends_on: ["T-004", "T-006", "T-013"]
+    owns: ["tests/test_app_registry.py", "tests/test_app_views.py", "tests/test_blast_radius.py", "tests/test_endpoint_main_window.py", "tests/test_model_fetcher.py", "tests/test_models.py", "tests/test_presets.py", "tests/test_protocol_capability.py", "tests/test_protocols.py", "tests/test_structured_main_window.py", "tests/test_supervisor.py", "tests/test_transaction.py", "tests/test_yaml_manager.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/data/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src"}
+        timeout_seconds: 1800
 interfaces:
   produces: []
   consumes: []
