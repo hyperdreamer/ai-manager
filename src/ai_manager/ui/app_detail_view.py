@@ -394,24 +394,84 @@ class AppDetailView(QWidget):
         )
 
     def adopt_saved_baseline(self, snapshot: ConfigSnapshot, *, preserve_draft: bool) -> tuple[str, ...]:
-        """Install the saved snapshot, conservatively retaining the whole draft."""
-        draft = self.get_current_draft() if preserve_draft else None
+        """Install a saved baseline, rebasing each visible logical field."""
+        if not preserve_draft or self._snapshot is None:
+            self.load_config(snapshot)
+            return ()
+
+        order = (
+            "api_base", "api_key", "endpoint", "is_split_model",
+            "model", "ocr_model", "text_model",
+        )
+
+        def values(config: AppAIConfig) -> dict:
+            result = config.model_dump()
+            result["endpoint"] = (config.endpoint, config.endpoint_raw)
+            result.pop("endpoint_raw")
+            return result
+
+        old_snapshot = self._snapshot
+        old_draft = self.get_current_draft()
         old = (
             self._snapshot, self._current_config, self._loaded_endpoint,
-            self._loaded_endpoint_raw, self._endpoint, self._endpoint_raw, self._protocol_edited,
+            self._loaded_endpoint_raw, self._endpoint, self._endpoint_raw,
+            self._protocol_edited, self._is_loading,
         )
+        loaded, draft, committed = (
+            values(old_snapshot.config),
+            values(old_draft),
+            values(snapshot.config),
+        )
+        merged, conflicts = {}, set()
+        for name in order:
+            if draft[name] == loaded[name]:
+                merged[name] = committed[name]
+            elif committed[name] == loaded[name] or draft[name] == committed[name]:
+                merged[name] = draft[name]
+            else:
+                merged[name] = draft[name]
+                conflicts.add(name)
+
+        cross = []
+        for leaf in ("model", "ocr_model", "text_model"):
+            if (
+                committed["is_split_model"] != loaded["is_split_model"]
+                and draft[leaf] != loaded[leaf]
+                and draft[leaf] != committed[leaf]
+            ) or (
+                draft["is_split_model"] != loaded["is_split_model"]
+                and committed[leaf] != loaded[leaf]
+                and committed[leaf] != draft[leaf]
+            ):
+                cross.append(leaf)
+        if cross:
+            conflicts.update(("is_split_model", *cross))
+            merged["is_split_model"] = draft["is_split_model"]
+            for leaf in ("model", "ocr_model", "text_model"):
+                merged[leaf] = draft[leaf]
+
+        endpoint, endpoint_raw = merged.pop("endpoint")
+        merged.update(endpoint=endpoint, endpoint_raw=endpoint_raw)
+        merged_config = AppAIConfig.model_validate(merged)
+
         try:
             self.load_config(snapshot)
-            if draft is not None:
-                self._display_draft(draft)
+            self._display_draft(merged_config)
         except Exception:
+            try:
+                self.load_config(old_snapshot)
+                self._display_draft(old_draft)
+            except Exception:
+                pass
             (
                 self._snapshot, self._current_config, self._loaded_endpoint,
-                self._loaded_endpoint_raw, self._endpoint, self._endpoint_raw, self._protocol_edited,
+                self._loaded_endpoint_raw, self._endpoint, self._endpoint_raw,
+                self._protocol_edited, self._is_loading,
             ) = old
             self._refresh_save_enablement()
             raise
-        return ()
+
+        return tuple(name for name in order if name in conflicts)
 
     def _on_protocol_selected(self, index: int) -> None:
         if self._is_loading or self._protocol_combo is None or index not in range(4):

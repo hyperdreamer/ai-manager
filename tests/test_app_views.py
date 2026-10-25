@@ -179,15 +179,224 @@ def test_llm_adopt_saved_baseline_rebases_with_and_without_draft(qtbot):
     committed = AppAIConfig(api_base="http://127.0.0.1:8123", model="saved")
 
     detail.adopt_saved_baseline(snapshot(committed), preserve_draft=True)
-    # The baseline moves; the widget values and the draft do not.
+    # The baseline moves; the unedited base adopts it while the dirty model stays visible.
     assert detail._current_config == committed
     assert detail.get_current_draft() == AppAIConfig(
-        api_base="http://127.0.0.1:8000", model="user-typed"
+        api_base="http://127.0.0.1:8123", model="user-typed"
     )
 
     detail.adopt_saved_baseline(snapshot(committed), preserve_draft=False)
     assert detail._current_config == committed
     assert detail.get_current_draft() == committed
+
+
+def _rebase_field_config(field, value):
+    data = {
+        "api_base": "https://base",
+        "api_key": "$BASE",
+        "is_split_model": field in ("ocr_model", "text_model"),
+    }
+    if field == "endpoint":
+        data.update(endpoint=value[0], endpoint_raw=value[1])
+    else:
+        data[field] = value
+    return AppAIConfig(**data)
+
+
+@pytest.mark.parametrize("field,old,user,committed", [
+    ("api_base", "https://old", "https://user", "https://committed"),
+    ("api_key", "$OLD", "$USER", "$COMMITTED"),
+    ("endpoint", (None, None), ("/v1/messages", None), ("/v1/responses", None)),
+    ("model", "old", "user", "committed"),
+    ("ocr_model", "old", "user", "committed"),
+    ("text_model", "old", "user", "committed"),
+])
+@pytest.mark.parametrize("case", ["unedited", "user-only", "agree", "disagree"])
+def test_rebase_four_field_cases(qtbot, tmp_path, field, old, user, committed, case):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+
+    local = _rebase_field_config(field, old)
+    draft = _rebase_field_config(field, old if case == "unedited" else user)
+    disk = _rebase_field_config(
+        field, old if case == "user-only" else user if case == "agree" else committed
+    )
+    view.load_config(snapshot(local, digest=b"l" * 32))
+    view._display_draft(draft)
+    events = []
+    view.config_changed.connect(lambda *args: events.append(args))
+
+    conflicts = view.adopt_saved_baseline(
+        snapshot(disk, digest=b"c" * 32, present=False), preserve_draft=True
+    )
+
+    expected = disk if case == "unedited" else draft
+    assert view.get_current_draft() == expected
+    assert conflicts == ((field,) if case == "disagree" else ())
+    assert view._snapshot.config == disk
+    assert view._snapshot.api_base_present is False
+    assert events == []
+
+
+@pytest.mark.parametrize("case", ["unedited", "user-only", "agree", "disagree"])
+def test_rebase_endpoint_raw_equality_is_part_of_logical_field(qtbot, tmp_path, case):
+    view = AppDetailView(meta_for(tmp_path, "ai-grammar"))
+    qtbot.addWidget(view)
+    old = (None, "None")
+    user = (None, "'/bad'")
+    committed = {
+        "unedited": (None, "'/committed'"),
+        "user-only": old,
+        "agree": user,
+        "disagree": (None, None),
+    }[case]
+    local = _rebase_field_config("endpoint", old)
+    draft = _rebase_field_config("endpoint", old if case == "unedited" else user)
+    disk = _rebase_field_config("endpoint", committed)
+    view.load_config(snapshot(local))
+    view._display_draft(draft)
+
+    conflicts = view.adopt_saved_baseline(snapshot(disk), preserve_draft=True)
+
+    assert view.get_current_draft() == (disk if case == "unedited" else draft)
+    assert conflicts == (("endpoint",) if case == "disagree" else ())
+
+
+def _mode_config(split, *, model="old", ocr_model=None, text_model=None):
+    if split:
+        return AppAIConfig(
+            api_base="https://base",
+            is_split_model=True,
+            ocr_model=ocr_model,
+            text_model=text_model,
+        )
+    return AppAIConfig(api_base="https://base", model=model, is_split_model=False)
+
+
+@pytest.mark.parametrize("draft_split,committed_split", [
+    (False, False), (False, True), (True, False), (True, True),
+])
+def test_rebase_mode_only_truth_table_has_no_leaf_conflict(
+    qtbot, tmp_path, draft_split, committed_split
+):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    local = _mode_config(False, model="old")
+    draft = _mode_config(draft_split, model="old")
+    committed = _mode_config(committed_split, model="old")
+    view.load_config(snapshot(local))
+    view._display_draft(draft)
+
+    conflicts = view.adopt_saved_baseline(snapshot(committed), preserve_draft=True)
+
+    want_split = draft_split or committed_split
+    assert view.get_current_draft() == _mode_config(want_split, model="old")
+    assert conflicts == ()
+
+
+def test_rebase_committed_mode_change_retains_user_old_active_leaf(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    local = _mode_config(False, model="old")
+    draft = _mode_config(False, model="user")
+    committed = _mode_config(
+        True, ocr_model="committed-ocr", text_model="committed-text"
+    )
+    view.load_config(snapshot(local))
+    view._display_draft(draft)
+
+    conflicts = view.adopt_saved_baseline(snapshot(committed), preserve_draft=True)
+
+    assert conflicts == ("is_split_model", "model")
+    assert view.get_current_draft() == draft
+    assert view._snapshot.config == committed
+
+
+def test_rebase_user_mode_change_retains_user_active_leaves_when_commit_edits_old_leaf(
+    qtbot, tmp_path
+):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    local = _mode_config(False, model="old")
+    draft = _mode_config(True, ocr_model="user-ocr", text_model="user-text")
+    committed = _mode_config(False, model="committed")
+    view.load_config(snapshot(local))
+    view._display_draft(draft)
+
+    conflicts = view.adopt_saved_baseline(snapshot(committed), preserve_draft=True)
+
+    assert conflicts == ("is_split_model", "model")
+    assert view.get_current_draft() == draft
+
+
+def test_rebase_originally_absent_leaf_conflict_stays_visible(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    local = _mode_config(True, ocr_model="ocr-old", text_model=None)
+    draft = _mode_config(True, ocr_model="ocr-old", text_model="text-user")
+    committed = _mode_config(False, model="committed")
+    view.load_config(snapshot(local))
+    view._display_draft(draft)
+
+    conflicts = view.adopt_saved_baseline(snapshot(committed), preserve_draft=True)
+
+    assert conflicts == ("is_split_model", "text_model")
+    assert view.get_current_draft() == draft
+
+
+def test_rebase_independent_ocr_and_text_edits_merge_without_group_conflict(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    local = _mode_config(True, ocr_model="ocr-old", text_model="text-old")
+    draft = _mode_config(True, ocr_model="ocr-user", text_model="text-old")
+    committed = _mode_config(True, ocr_model="ocr-old", text_model="text-committed")
+    view.load_config(snapshot(local))
+    view._display_draft(draft)
+
+    conflicts = view.adopt_saved_baseline(snapshot(committed), preserve_draft=True)
+
+    assert conflicts == ()
+    assert view.get_current_draft() == _mode_config(
+        True, ocr_model="ocr-user", text_model="text-committed"
+    )
+
+
+def test_rebase_protocol_away_and_back_clears_derived_edit_intent(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "ai-grammar"))
+    qtbot.addWidget(view)
+    local = AppAIConfig(api_base="https://old", endpoint="/v1/responses")
+    committed = AppAIConfig(api_base="https://committed", endpoint="/v1/messages")
+    view.load_config(snapshot(local))
+    view._protocol_combo.setCurrentIndex(0)
+    assert view._protocol_edited
+    view._protocol_combo.setCurrentIndex(2)
+    assert not view._protocol_edited
+    events = []
+    view.config_changed.connect(lambda *args: events.append(args))
+
+    conflicts = view.adopt_saved_baseline(snapshot(committed), preserve_draft=True)
+
+    assert conflicts == ()
+    assert view.get_current_draft() == committed
+    assert not view._protocol_edited
+    assert events == []
+
+
+def test_rebase_agreeing_protocol_update_adopts_committed_pair(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "ai-grammar"))
+    qtbot.addWidget(view)
+    local = AppAIConfig(endpoint="/v1/chat/completions")
+    draft = AppAIConfig(endpoint="/v1/messages")
+    committed = AppAIConfig(api_base="https://new", endpoint="/v1/messages")
+    view.load_config(snapshot(local))
+    view._display_draft(draft)
+
+    conflicts = view.adopt_saved_baseline(snapshot(committed), preserve_draft=True)
+
+    assert conflicts == ()
+    assert view.get_current_draft() == committed
+    assert (view._loaded_endpoint, view._loaded_endpoint_raw) == ("/v1/messages", None)
+    assert not view._protocol_edited
 
 
 def test_llm_show_config_error_displays_plain_text_detail(qtbot):
@@ -285,7 +494,9 @@ def test_sidebar_saved_port_strictness_and_llm_baseline_adoption(qtbot, tmp_path
     changed = []
     view.config_changed.connect(lambda *args: changed.append(args))
     view.adopt_saved_baseline(snapshot(new), preserve_draft=True)
-    assert view.get_current_draft() == draft and view._current_config == new
+    assert view.get_current_draft() == AppAIConfig(
+        api_base="http://127.0.0.1:8123", model="draft-only"
+    ) and view._current_config == new
     assert not changed
     view.adopt_saved_baseline(snapshot(new), preserve_draft=False)
     assert view.get_current_draft() == new and not changed
@@ -564,7 +775,9 @@ def test_snapshot_load_and_adoption_are_owned_silent_and_reset_intent(qtbot, tmp
     pending = view.get_current_draft()
     events.clear()
     committed = snapshot(AppAIConfig(model="committed", endpoint="/v1/responses"), present=False, digest=b"c" * 32)
-    assert view.adopt_saved_baseline(committed, preserve_draft=True) == ()
+    assert view.adopt_saved_baseline(committed, preserve_draft=True) == (
+        "endpoint", "model"
+    )
     assert view.get_current_draft() == pending and events == []
     assert view._snapshot.sha256 == b"c" * 32 and not view._snapshot.api_base_present
     assert (view._loaded_endpoint, view._loaded_endpoint_raw) == ("/v1/responses", None)
