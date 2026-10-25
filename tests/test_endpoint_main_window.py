@@ -198,8 +198,15 @@ def test_interim_dependent_reconciliation_rereads_snapshot(endpoint_window, dirt
     assert window._snapshots[app_id] == actual
     assert window._saved_configs[app_id] == actual.config
     assert view._current_config == actual.config
-    assert window._draft_configs[app_id] == (draft if dirty else actual.config)
-    assert view.get_current_draft() == window._draft_configs[app_id]
+    # Task 11's rebase adopts the committed value for every field the user did not
+    # edit, so a dirty draft is no longer expected to survive byte-identically: it
+    # must keep the user's own edit and take the file's value for everything else.
+    retained = window._draft_configs[app_id]
+    assert view.get_current_draft() == retained
+    assert retained.model == draft.model if dirty else retained == actual.config
+    if dirty:
+        assert retained.api_base == actual.config.api_base
+        assert retained.endpoint == actual.config.endpoint
 
 
 def test_interim_dependent_read_failure_retains_owned_state(endpoint_window):

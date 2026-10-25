@@ -296,8 +296,12 @@ def test_selected_dependents_reconcile_current_dirty_widgets(qtbot, window, monk
         and not window._is_dirty("textkit")
     )
     assert window._saved_configs["ai-grammar"].api_base == "http://127.0.0.1:8123"
-    assert window._draft_configs["ai-grammar"] == retained
-    assert grammar.get_current_draft() == retained
+    # The user's unsaved model edit survives; the field they did not touch (api_base)
+    # is adopted from the committed rewrite, and the coordinator draft matches the
+    # widgets rather than the pre-rebase copy.
+    assert window._draft_configs["ai-grammar"].model == retained.model
+    assert window._draft_configs["ai-grammar"].api_base == "http://127.0.0.1:8123"
+    assert grammar.get_current_draft() == window._draft_configs["ai-grammar"]
     assert grammar._current_config == window._saved_configs["ai-grammar"]
     assert window._is_dirty("ai-grammar")
     assert window._saved_configs["yt2txt"] == original_yt

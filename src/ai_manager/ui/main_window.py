@@ -928,14 +928,22 @@ class MainWindow(QMainWindow):
                 snapshot = read_app_config_snapshot(meta)
                 saved = copy.deepcopy(snapshot.config)
                 dirty = self._is_dirty(app_id)
-                draft = copy.deepcopy(view.get_current_draft() if dirty else snapshot.config)
-                view.adopt_saved_baseline(snapshot, preserve_draft=dirty)
+                conflicts = view.adopt_saved_baseline(snapshot, preserve_draft=dirty)
+                # The widgets rehearsed their own three-way merge, so the retained
+                # draft must be what they now show: keeping the pre-rebase copy here
+                # would leave the coordinator comparing against values the user can
+                # no longer see (and dirty state computed from them).
+                draft = copy.deepcopy(view.get_current_draft()) if dirty else copy.deepcopy(snapshot.config)
             except Exception as exc:
                 self._show_llm_load_error(app_id, exc)
                 continue
             self._snapshots[app_id] = snapshot
             self._saved_configs[app_id] = saved
             self._draft_configs[app_id] = draft
+            if conflicts:
+                self._baseline_conflict[app_id] = conflicts
+            else:
+                self._baseline_conflict.pop(app_id, None)
             self._set_dirty_indicator(app_id)
 
     @pyqtSlot(str, object)
