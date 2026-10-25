@@ -57,9 +57,19 @@ from ai_manager.config.yaml_manager import (
     read_app_config_snapshot,
     write_app_config,
 )
-from ai_manager.services.config_jobs import LauncherProbeJob, StructuredSaveJob
+from ai_manager.services.config_jobs import (
+    LauncherProbeJob,
+    ProtocolProbeDelivery,
+    ProtocolProbeJob,
+    StructuredSaveJob,
+)
 from ai_manager.services.desktop_integration import DesktopIntegrationService
 from ai_manager.services.model_fetcher import ModelFetchWorker
+from ai_manager.services.protocol_capability import (
+    ProtocolSupport,
+    invalidate_protocol_support,
+    protocol_support_generation,
+)
 from ai_manager.services.supervisor import SupervisorManager
 from ai_manager.ui.app_detail_view import AppDetailView
 from ai_manager.ui.app_sidebar import AppSidebar
@@ -132,6 +142,10 @@ class MainWindow(QMainWindow):
         self._baseline_conflict: dict[str, tuple[str, ...]] = {}
         self._launcher_gate_cache: Dict[Path, Optional[LauncherProbeResult]] = {}
         self._probe_jobs: Dict[Path, LauncherProbeJob] = {}
+        self._protocol_probe_tokens: dict[str, int] = {}
+        self._protocol_probe_jobs: dict[tuple[str, int], ProtocolProbeJob] = {}
+        self._protocol_probe_deliveries: dict[tuple[str, int], ProtocolProbeDelivery] = {}
+        self._protocol_support: dict[str, ProtocolSupport] = {}
         self._save_jobs: Dict[str, StructuredSaveJob] = {}
         self._model_workers: Dict[int, ModelFetchWorker] = {}
         self._pending_restarts: Dict[str, bool] = {}
@@ -168,6 +182,7 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._load_all_configs()
         self._start_launcher_probes()
+        self._start_protocol_probes()
         self._apply_theme(self.settings.theme)
 
         # Polling Timer
@@ -564,15 +579,13 @@ class MainWindow(QMainWindow):
         return tuple(match for match in matches if match.meta.id in selected_ids)
 
     def _on_restart_requested(self, app_id: str) -> None:
-        # A restart writes no configuration and clears no dirty state.
-        self.supervisor_manager.restart_service(app_id)
-
-    def _request_saved_restart(self, app_id: str) -> None:
-        self._save_restart_pending.add(app_id)
-        self.supervisor_manager.restart_service(app_id)
-        if app_id in self._save_restart_pending:
-            self._save_restart_pending.discard(app_id)
-            self.views[app_id].show_config_error("Configuration saved. Restart requested.")
+        # Busy refusal is synchronous and unqualified, so carry this dispatch's origin.
+        previous = self._submitting_restart
+        self._submitting_restart = app_id
+        try:
+            self.supervisor_manager.restart_service(app_id)
+        finally:
+            self._submitting_restart = previous
 
     def _on_fetch_models(self, request: ModelFetchRequest) -> None:
         meta = self.apps.get(request.app_id)
@@ -641,6 +654,47 @@ class MainWindow(QMainWindow):
         for other_id, meta in self.apps.items():
             if meta.config_kind == "chat2api" and meta.relative_path.resolve() == key:
                 self.views[other_id].set_launcher_gate(result)
+
+    def _start_protocol_probes(self) -> None:
+        """Probe participating apps only after their views and snapshots exist."""
+        for app_id, meta in self.apps.items():
+            if meta.supports_protocol_selection:
+                self._start_protocol_probe(app_id)
+
+    def _start_protocol_probe(self, app_id: str) -> None:
+        meta = self.apps.get(app_id)
+        if meta is None or not meta.supports_protocol_selection or app_id not in self.views:
+            return
+        token = self._protocol_probe_tokens.get(app_id, 0) + 1
+        generation = protocol_support_generation(app_id)
+        self._protocol_probe_tokens[app_id] = token
+        key = (app_id, token)
+        job = ProtocolProbeJob(meta, token, generation)
+        delivery = ProtocolProbeDelivery(self, app_id, token, generation)
+        self._protocol_probe_jobs[key] = job
+        self._protocol_probe_deliveries[key] = delivery
+        job.signals.probe_finished.connect(
+            delivery.finished, Qt.ConnectionType.QueuedConnection
+        )
+        self.thread_pool.start(job)
+
+    def _on_protocol_probe_finished(
+        self, app_id: str, token: int, generation: int, support: ProtocolSupport
+    ) -> None:
+        key = (app_id, token)
+        self._protocol_probe_jobs.pop(key, None)
+        delivery = self._protocol_probe_deliveries.pop(key, None)
+        if delivery is not None:
+            delivery.deleteLater()
+        meta = self.apps.get(app_id)
+        if meta is None or not meta.supports_protocol_selection or app_id not in self.views:
+            return
+        if self._protocol_probe_tokens.get(app_id) != token:
+            return
+        if protocol_support_generation(app_id) != generation:
+            return
+        self._protocol_support[app_id] = support
+        self.views[app_id].set_protocol_support(support)
 
     def _update_auth_warnings(self) -> None:
         for app_id, meta in self.apps.items():
@@ -752,11 +806,12 @@ class MainWindow(QMainWindow):
     def _request_saved_restart(self, app_id: str) -> None:
         self.views[app_id].show_config_error("Configuration saved. Restart requested.")
         self._save_restart_pending.add(app_id)
+        previous = self._submitting_restart
         self._submitting_restart = app_id
         try:
             self.supervisor_manager.restart_service(app_id)
         finally:
-            self._submitting_restart = None
+            self._submitting_restart = previous
 
     def _on_supervisor_status(self, status: SupervisorStatus) -> None:
         if status.is_running:
@@ -791,14 +846,19 @@ class MainWindow(QMainWindow):
             app_id = self._submitting_restart
         else:
             app_id = None
-        if app_id is not None and app_id in self._save_restart_pending:
+        saved_restart = app_id is not None and app_id in self._save_restart_pending
+        if saved_restart:
             self._save_restart_pending.remove(app_id)
             self.views[app_id].show_config_error(
                 "service restart succeeded"
                 if success
                 else f"Configuration saved, but service restart failed: {msg}"
             )
-        elif not success:
+        meta = self.apps.get(app_id)
+        if meta is not None and meta.supports_protocol_selection:
+            invalidate_protocol_support(app_id)
+            self._start_protocol_probe(app_id)
+        if not saved_restart and not success:
             QMessageBox.warning(self, "Supervisor Action Failed", f"Action: {action}\n{msg}")
 
     def _toggle_theme(self) -> None:

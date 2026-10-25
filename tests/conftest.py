@@ -184,6 +184,22 @@ def isolate_manager(monkeypatch):
             raising=False,
         )
         monkeypatch.setattr(mw.MainWindow, "_start_launcher_probes", passed)
+    from ai_manager.services.protocol_capability import ProtocolSupport, ProtocolSupportStatus
+
+    def unknown_protocols(window):
+        for app_id, meta in window.apps.items():
+            if meta.supports_protocol_selection:
+                support = ProtocolSupport(ProtocolSupportStatus.UNVERIFIABLE)
+                window._protocol_support[app_id] = support
+                window.views[app_id].set_protocol_support(support)
+
+    monkeypatch.setattr(
+        mw.MainWindow,
+        "_production_start_protocol_probes",
+        mw.MainWindow._start_protocol_probes,
+        raising=False,
+    )
+    monkeypatch.setattr(mw.MainWindow, "_start_protocol_probes", unknown_protocols)
 
 
 @pytest.fixture

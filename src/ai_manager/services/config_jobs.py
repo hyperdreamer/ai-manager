@@ -1,20 +1,15 @@
-"""Qt worker ownership for structured configuration jobs.
+"""Qt workers and GUI delivery for configuration and capability jobs.
 
-Workers run off the GUI thread and emit exactly one terminal result each through
-their own ``ConfigJobSignals`` instance. They never touch widgets, never open
-dialogs, and never display anything themselves: the receiver decides what the
-result means. MainWindow keeps a job alive until its terminal signal arrives and
-uses queued delivery into its own slots.
-
-Task 7 installs the capability-gate worker (``LauncherProbeJob``). Task 9 adds
-the save worker (``StructuredSaveJob``).
+Workers own their inputs and emit terminal results without touching widgets.
+MainWindow retains each worker until queued delivery into its GUI context.
 """
 
 from __future__ import annotations
 
 import copy
+from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
+from PyQt6.QtCore import QObject, QRunnable, pyqtSignal, pyqtSlot
 
 from ai_manager.config.models import AppMetadata
 from ai_manager.config.structured_models import (
@@ -23,6 +18,14 @@ from ai_manager.config.structured_models import (
     StructuredDoc,
 )
 from ai_manager.services.launcher_gate import probe_launcher
+from ai_manager.services.protocol_capability import (
+    ProtocolSupport,
+    _probe_protocol_support_at_generation,
+    _unknown,
+)
+
+if TYPE_CHECKING:
+    from ai_manager.ui.main_window import MainWindow
 
 
 class ConfigJobSignals(QObject):
@@ -30,7 +33,7 @@ class ConfigJobSignals(QObject):
 
     save_finished = pyqtSignal(str, object)  # app_id, SaveResult
     save_failed = pyqtSignal(str, object)  # app_id, ConfigError
-    probe_finished = pyqtSignal(str, object)  # app_id, LauncherProbeResult
+    probe_finished = pyqtSignal(str, object)  # app_id, launcher or protocol support
 
 
 class LauncherProbeJob(QRunnable):
@@ -55,6 +58,49 @@ class LauncherProbeJob(QRunnable):
                 detail=f"Launcher capability check failed: {exc}",
             )
         self.signals.probe_finished.emit(self.meta.id, result)
+
+
+class ProtocolProbeJob(QRunnable):
+    """Probe an owned app at the generation captured before queueing."""
+
+    def __init__(self, meta: AppMetadata, token: int, generation: int) -> None:
+        super().__init__()
+        self.meta = meta.model_copy(deep=True)
+        self._token, self._generation = token, generation
+        self.signals = ConfigJobSignals()
+
+    @property
+    def token(self) -> int:
+        return self._token
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    def run(self) -> None:
+        try:
+            result = _probe_protocol_support_at_generation(
+                self.meta, generation=self.generation
+            )
+        except Exception as exc:
+            result = _unknown(f"Protocol capability check failed: {exc}")
+        self.signals.probe_finished.emit(self.meta.id, result)
+
+
+class ProtocolProbeDelivery(QObject):
+    """Carry immutable worker context through a GUI-owned queued slot."""
+
+    def __init__(self, window: MainWindow, app_id: str, token: int, generation: int) -> None:
+        super().__init__(window)
+        self._window = window
+        self._app_id, self._token, self._generation = app_id, token, generation
+
+    @pyqtSlot(str, object)
+    def finished(self, emitted_id: str, support: ProtocolSupport) -> None:
+        if emitted_id == self._app_id:
+            self._window._on_protocol_probe_finished(
+                self._app_id, self._token, self._generation, support
+            )
 
 
 class StructuredSaveJob(QRunnable):
