@@ -516,3 +516,23 @@ def test_two_processes_reverse_input_order_finish_or_refuse_stale(tmp_path):
             if child.is_alive():
                 child.terminate()
                 child.join(2)
+
+
+def test_cleanup_preserves_primary_unknown_report(tmp_path, monkeypatch):
+    path = files(tmp_path, 1)[0]
+    report = tm.TransactionReport(phase="rollback", files={path: "unknown"}, error="primary")
+    primary = TransactionError(report)
+    actual_release = tm.Transaction._release
+
+    def release(self):
+        actual_release(self)
+        raise OSError("cleanup fixture")
+
+    monkeypatch.setattr(tm.Transaction, "_release", release)
+    with pytest.raises(TransactionError) as caught:
+        with tm.Transaction() as tx:
+            tx.prepare([path], {path: digest(path)})
+            raise primary
+    assert caught.value is primary and caught.value.report is report
+    assert isinstance(caught.value.__cause__, OSError)
+    assert tx._state == "closed" and tx._locks == []

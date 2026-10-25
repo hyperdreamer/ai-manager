@@ -10,7 +10,9 @@ from pathlib import Path
 from typing import Any
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.error import YAMLError
 from ai_manager.config.config_errors import (
+    CommittedWriteError,
     ConfigError,
     ConfigLoadError,
     ConfigShapeError,
@@ -170,64 +172,157 @@ def render_app_config(meta: AppMetadata, doc: MutableMapping[str, Any], mutate: 
     return _render_document(candidate)
 
 
-def _apply_ai_config(meta: AppMetadata, doc: MutableMapping[str, Any], new_config: AppAIConfig) -> None:
-    if "ai" not in doc or not isinstance(doc["ai"], dict):
-        doc["ai"] = CommentedMap()
-    ai_sec = doc["ai"]
-    ai_sec["api_base"] = new_config.api_base
-    ai_sec["api_key"] = new_config.api_key
-    if new_config.is_split_model and meta.supports_split_models:
-        ai_sec.pop("model", None)
-        if not isinstance(ai_sec.get("ocr"), dict):
-            ai_sec["ocr"] = CommentedMap()
-        if not isinstance(ai_sec.get("text"), dict):
-            ai_sec["text"] = CommentedMap()
-        ai_sec["ocr"]["model"] = new_config.ocr_model or ""
-        ai_sec["text"]["model"] = new_config.text_model or ""
-    else:
-        ai_sec.pop("ocr", None)
-        ai_sec.pop("text", None)
-        ai_sec["model"] = new_config.model or ""
+def _assert_endpoint(meta: AppMetadata, config: AppAIConfig) -> None:
+    if meta.supports_protocol_selection and config.endpoint_raw is not None:
+        raise ValueError("Invalid ai.endpoint must be explicitly repaired before saving.")
+    if config.endpoint is not None and not is_valid_endpoint(config.endpoint):
+        raise ValueError(f"Unsupported ai.endpoint value: {config.endpoint!r}.")
 
 
-def write_app_config(app_meta: AppMetadata, new_config: AppAIConfig, expected_sha256: bytes | None = None) -> None:
-    """Atomically updates the application's config.yaml with comment preservation."""
+def _apply_ai_config(
+    meta: AppMetadata,
+    doc: MutableMapping[str, Any],
+    new_config: AppAIConfig,
+    baseline: AppAIConfig,
+) -> None:
+    """Apply only edited managed leaves, reserving structural cleanup for toggles."""
+    require_llm(meta)
+    _assert_endpoint(meta, new_config)
+
+    def ai_mapping() -> MutableMapping[str, Any]:
+        ai = doc.get("ai")
+        if not isinstance(ai, MutableMapping):
+            ai = doc["ai"] = CommentedMap()
+        return ai
+
+    def set_or_pop(mapping: MutableMapping[str, Any], key: str, value: str | None) -> None:
+        if value is None:
+            mapping.pop(key, None)
+        else:
+            mapping[key] = value
+
+    def leaf(key: str, value: str | None, section: str | None = None) -> None:
+        ai = doc.get("ai")
+        if not isinstance(ai, MutableMapping):
+            if value is None:
+                return
+            ai = ai_mapping()
+        mapping = ai
+        if section is not None:
+            mapping = ai.get(section)
+            if not isinstance(mapping, MutableMapping):
+                if value is None:
+                    return
+                mapping = ai[section] = CommentedMap()
+        set_or_pop(mapping, key, value)
+
+    if new_config.api_base != baseline.api_base:
+        leaf("api_base", new_config.api_base)
+    if new_config.api_key != baseline.api_key:
+        leaf("api_key", new_config.api_key)
+    if meta.supports_protocol_selection and (
+        new_config.endpoint != baseline.endpoint or baseline.endpoint_raw is not None
+    ):
+        leaf("endpoint", new_config.endpoint)
+
+    split = meta.supports_split_models and new_config.is_split_model
+    was_split = meta.supports_split_models and baseline.is_split_model
+    if split != was_split:
+        ai = ai_mapping()
+        if split:
+            ai.pop("model", None)
+            for section, model in (("ocr", new_config.ocr_model), ("text", new_config.text_model)):
+                if not isinstance(ai.get(section), MutableMapping):
+                    ai[section] = CommentedMap()
+                set_or_pop(ai[section], "model", model)
+        else:
+            ai.pop("ocr", None)
+            ai.pop("text", None)
+            set_or_pop(ai, "model", new_config.model)
+    elif split:
+        if new_config.ocr_model != baseline.ocr_model:
+            leaf("model", new_config.ocr_model, "ocr")
+        if new_config.text_model != baseline.text_model:
+            leaf("model", new_config.text_model, "text")
+    elif new_config.model != baseline.model:
+        leaf("model", new_config.model)
+
+
+def write_app_config(
+    app_meta: AppMetadata,
+    new_config: AppAIConfig,
+    *,
+    baseline: AppAIConfig,
+    expected_sha256: bytes | None = None,
+) -> bytes:
+    """Commit a managed diff and return the SHA-256 of the installed YAML bytes."""
     require_llm(app_meta)
-    if expected_sha256 is not None:
-        from ai_manager.config.structured_config import _snapshot
-        from ai_manager.config.transaction import Transaction
-        cfg_path, raw, _mode, _reasons = _snapshot(get_config_path(app_meta))
-        if raw is None:
-            raise StaleDocumentError(cfg_path, expected_sha256, None)
-        doc = _get_yaml_engine().load(raw.decode("utf-8"))
-        if doc is None:
-            doc = CommentedMap()
-        rendered = render_app_config(app_meta, doc, lambda tree: _apply_ai_config(app_meta, tree, new_config))
-        with Transaction() as tx:
-            tx.prepare([cfg_path], {cfg_path: expected_sha256})
-            tx.backups()
-            tx.stage({cfg_path: rendered})
-            tx.replace_all()
-        return
-    cfg_path = ensure_config_exists(app_meta)
-    doc = _get_yaml_engine().load(cfg_path.read_text(encoding="utf-8"))
-    if doc is None:
-        doc = CommentedMap()
-    rendered = render_app_config(app_meta, doc, lambda tree: _apply_ai_config(app_meta, tree, new_config))
-    backup_path = cfg_path.with_name(f"{cfg_path.name}.bak")
-    shutil.copy2(cfg_path, backup_path)
-    temp_path = cfg_path.with_name(f"{cfg_path.name}.tmp.{os.getpid()}_{uuid.uuid4().hex[:6]}")
     try:
-        with open(temp_path, "wb") as stream:
-            stream.write(rendered)
-            stream.flush()
-            os.fsync(stream.fileno())
-        if cfg_path.exists():
-            os.chmod(temp_path, stat.S_IMODE(cfg_path.stat().st_mode))
-        os.replace(temp_path, cfg_path)
-    finally:
-        if temp_path.exists():
+        if expected_sha256 is not None and (
+            type(expected_sha256) is not bytes or len(expected_sha256) != 32
+        ):
+            raise ValueError("Expected digest must be a 32-byte SHA-256 value.")
+
+        from ai_manager.config.structured_config import _snapshot
+
+        cfg_path, raw, _mode, _reasons = _snapshot(get_config_path(app_meta))
+        actual = None if raw is None else hashlib.sha256(raw).digest()
+        if expected_sha256 is not None and actual != expected_sha256:
+            raise StaleDocumentError(cfg_path, expected_sha256, actual)
+        _assert_endpoint(app_meta, new_config)
+        if expected_sha256 is None:
+            # Inspect the leaf before ensure: even a dangling symlink must not
+            # become a destination for the compatibility example copy.
+            ensure_config_exists(app_meta)
+            if raw is None:
+                cfg_path, raw, _mode, _reasons = _snapshot(cfg_path)
+                actual = None if raw is None else hashlib.sha256(raw).digest()
+        if raw is None:
+            raise ConfigLoadError(cfg_path, "Configuration file is missing.")
+
+        raw_repair = app_meta.supports_protocol_selection and baseline.endpoint_raw is not None
+        if new_config == baseline and not raw_repair:
+            return actual
+        doc = _parse_llm_document(cfg_path, raw)
+        rendered = render_app_config(
+            app_meta, doc, lambda tree: _apply_ai_config(app_meta, tree, new_config, baseline)
+        )
+        if expected_sha256 is not None:
+            from ai_manager.config.transaction import Transaction
+
+            installed = None
+            report = None
             try:
-                temp_path.unlink()
+                with Transaction() as tx:
+                    tx.prepare([cfg_path], {cfg_path: expected_sha256})
+                    tx.backups()
+                    tx.stage({cfg_path: rendered})
+                    report = tx.replace_all()
+                    installed = hashlib.sha256(rendered).digest()
+            except Exception as exc:
+                if installed is not None:
+                    raise CommittedWriteError(cfg_path, installed, report, exc) from exc
+                raise
+            return installed
+
+        backup_path = cfg_path.with_name(f"{cfg_path.name}.bak")
+        shutil.copy2(cfg_path, backup_path)
+        temp_path = cfg_path.with_name(f"{cfg_path.name}.tmp.{os.getpid()}_{uuid.uuid4().hex[:6]}")
+        fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(rendered)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temp_path, stat.S_IMODE(cfg_path.stat().st_mode))
+            os.replace(temp_path, cfg_path)
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
+        return hashlib.sha256(rendered).digest()
+    except ConfigError:
+        raise
+    except (OSError, UnicodeError, YAMLError, TypeError, ValueError) as exc:
+        raise ConfigError(f"Configuration save failed: {exc}") from exc

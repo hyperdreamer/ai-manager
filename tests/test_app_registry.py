@@ -57,7 +57,7 @@ def test_legacy_dispatch_does_not_materialize_structured_examples(five_app_works
         for call in (
             lambda: ensure_config_exists(meta),
             lambda: read_app_config(meta),
-            lambda: write_app_config(meta, AppAIConfig()),
+            lambda: write_app_config(meta, AppAIConfig(), baseline=AppAIConfig()),
         ):
             with pytest.raises(ConfigError):
                 call()
