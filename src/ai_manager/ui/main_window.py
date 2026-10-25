@@ -40,6 +40,7 @@ from ai_manager.config.config_errors import (
 from ai_manager.config.models import (
     AppAIConfig,
     AppMetadata,
+    ConfigSnapshot,
     ModelFetchRequest,
     ModelFetchResponse,
     ServiceRunState,
@@ -51,7 +52,11 @@ from ai_manager.config.models import (
 from ai_manager.config.structured_config import _candidate, load as load_structured, render
 from ai_manager.config.structured_models import LauncherProbeResult, SaveResult, StructuredDoc
 from ai_manager.config.structured_schema import validate_in_process
-from ai_manager.config.yaml_manager import read_app_config, write_app_config
+from ai_manager.config.yaml_manager import (
+    ensure_config_exists,
+    read_app_config_snapshot,
+    write_app_config,
+)
 from ai_manager.services.config_jobs import LauncherProbeJob, StructuredSaveJob
 from ai_manager.services.desktop_integration import DesktopIntegrationService
 from ai_manager.services.model_fetcher import ModelFetchWorker
@@ -122,6 +127,9 @@ class MainWindow(QMainWindow):
         # ``AppAIConfig`` for LLM apps and a ``StructuredDoc`` otherwise.
         self._saved_configs: Dict[str, object] = {}
         self._draft_configs: Dict[str, object] = {}
+        self._snapshots: dict[str, ConfigSnapshot] = {}
+        self._load_failed: dict[str, bool] = {}
+        self._baseline_conflict: dict[str, tuple[str, ...]] = {}
         self._launcher_gate_cache: Dict[Path, Optional[LauncherProbeResult]] = {}
         self._probe_jobs: Dict[Path, LauncherProbeJob] = {}
         self._save_jobs: Dict[str, StructuredSaveJob] = {}
@@ -252,6 +260,8 @@ class MainWindow(QMainWindow):
             view.save_requested.connect(self._on_save_requested)
             view.restart_requested.connect(self._on_restart_requested)
             view.fetch_models_requested.connect(self._on_fetch_models)
+            if meta.config_kind == "llm":
+                view.reload_requested.connect(self._reload_config)
             self.views[app_id] = view
             self.stack.addWidget(view)
 
@@ -270,9 +280,24 @@ class MainWindow(QMainWindow):
         meta, view = self.apps[app_id], self.views[app_id]
         if meta.config_kind == "llm":
             try:
-                config = read_app_config(meta)
-            except Exception:
-                config = AppAIConfig()
+                # Only the initial coordinator load may create from an example.
+                if app_id not in self._load_failed:
+                    ensure_config_exists(meta)
+                snapshot = read_app_config_snapshot(meta)
+                saved = copy.deepcopy(snapshot.config)
+                draft = copy.deepcopy(snapshot.config)
+                view.load_config(snapshot)
+            except Exception as exc:
+                self._show_llm_load_error(app_id, exc)
+                return
+            self._snapshots[app_id] = snapshot
+            self._saved_configs[app_id] = saved
+            self._draft_configs[app_id] = draft
+            self._load_failed[app_id] = False
+            self._baseline_conflict.setdefault(app_id, ())
+            view.set_recovery_state(load_failed=False, conflicts=self._baseline_conflict[app_id])
+            self._set_dirty_indicator(app_id)
+            return
         elif meta.config_kind in ("chat2api", "file-bridge"):
             try:
                 config = load_structured(
@@ -326,6 +351,18 @@ class MainWindow(QMainWindow):
                 return
             raise
         self._update_configured_port(app_id, config)
+        self._set_dirty_indicator(app_id)
+
+    def _show_llm_load_error(self, app_id: str, error: Exception) -> None:
+        meta = self.apps[app_id]
+        failure = error if isinstance(error, ConfigLoadError) else ConfigLoadError(
+            meta.relative_path / meta.config_file_name, str(error)
+        )
+        self._load_failed[app_id] = True
+        self.views[app_id].set_recovery_state(
+            load_failed=True, conflicts=self._baseline_conflict.get(app_id, ()),
+            message=str(failure), detail=failure.detail,
+        )
         self._set_dirty_indicator(app_id)
 
     def _reload_config(self, app_id: str) -> None:
@@ -409,6 +446,8 @@ class MainWindow(QMainWindow):
         except ConfigError as exc:
             self.views[app_id].show_config_error(str(exc))
             return
+        if self.apps[app_id].config_kind == "llm" and app_id not in self._snapshots:
+            return
         self._draft_configs[app_id] = copy.deepcopy(new_draft)
         self._set_dirty_indicator(app_id)
         self._update_auth_warnings()
@@ -422,10 +461,26 @@ class MainWindow(QMainWindow):
             if meta.config_kind == "llm":
                 if not isinstance(config, AppAIConfig):
                     raise ConfigError(PAYLOAD_KIND_MISMATCH)
-                write_app_config(meta, config)
-                self._saved_configs[app_id] = config.model_copy(deep=True)
-                self._draft_configs[app_id] = config.model_copy(deep=True)
-                view.adopt_saved_baseline(config, preserve_draft=False)
+                old = self._snapshots.get(app_id)
+                if old is None:
+                    raise ConfigError("Reload the configuration before saving.")
+                canonical = AppAIConfig.model_validate(config.model_dump())
+                saved = canonical.model_copy(deep=True)
+                draft = canonical.model_copy(deep=True)
+                digest = write_app_config(
+                    meta, canonical, baseline=old.config, expected_sha256=old.sha256
+                )
+                snapshot = ConfigSnapshot(
+                    canonical, digest, old.api_base_present or canonical.api_base != old.config.api_base
+                )
+                try:
+                    view.load_config(snapshot)
+                except Exception as exc:
+                    self._show_llm_load_error(app_id, exc)
+                    return
+                self._snapshots[app_id] = snapshot
+                self._saved_configs[app_id] = saved
+                self._draft_configs[app_id] = draft
                 self._set_dirty_indicator(app_id)
                 self._update_auth_warnings()
                 if should_restart:
@@ -620,12 +675,22 @@ class MainWindow(QMainWindow):
 
     def _reconcile_dependent_views(self, saved_dependents: dict[str, AppAIConfig]) -> None:
         """Install committed dependent baselines without discarding dirty drafts."""
-        for app_id, baseline in saved_dependents.items():
-            dirty = self._is_dirty(app_id)
-            self._saved_configs[app_id] = baseline.model_copy(deep=True)
-            if not dirty:
-                self._draft_configs[app_id] = baseline.model_copy(deep=True)
-            self.views[app_id].adopt_saved_baseline(baseline, preserve_draft=dirty)
+        for app_id in saved_dependents:
+            meta, view = self.apps[app_id], self.views[app_id]
+            try:
+                # The interim result still carries a bare config. Ownership must
+                # come from the registered file's actual bytes instead.
+                snapshot = read_app_config_snapshot(meta)
+                saved = copy.deepcopy(snapshot.config)
+                dirty = self._is_dirty(app_id)
+                draft = copy.deepcopy(view.get_current_draft() if dirty else snapshot.config)
+                view.adopt_saved_baseline(snapshot, preserve_draft=dirty)
+            except Exception as exc:
+                self._show_llm_load_error(app_id, exc)
+                continue
+            self._snapshots[app_id] = snapshot
+            self._saved_configs[app_id] = saved
+            self._draft_configs[app_id] = draft
             self._set_dirty_indicator(app_id)
 
     @pyqtSlot(str, object)

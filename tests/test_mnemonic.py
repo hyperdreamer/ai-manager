@@ -231,11 +231,14 @@ def test_app_detail_view_escapes_dynamic_model_names(qtbot):
     from pathlib import Path
 
     from ai_manager.config.app_registry import get_managed_apps
+    from ai_manager.config.models import AppAIConfig
     from ai_manager.ui.app_detail_view import AppDetailView
+    from tests.endpoint_helpers import snapshot
 
     apps = get_managed_apps(Path("/tmp"))
     view = AppDetailView(apps["textkit"])
     qtbot.addWidget(view)
+    view.load_config(snapshot(AppAIConfig()))
 
     # Provider model names are arbitrary text fed straight into QToolButtons.
     view.set_available_models(["plain", "qwen&co/7b", "a&&b"])

@@ -184,3 +184,23 @@ def isolate_manager(monkeypatch):
             raising=False,
         )
         monkeypatch.setattr(mw.MainWindow, "_start_launcher_probes", passed)
+
+
+@pytest.fixture
+def endpoint_window(qtbot, five_app_workspace, monkeypatch, request):
+    """Real five-app coordinator with controlled jobs, restart and teardown."""
+    from unittest.mock import MagicMock
+    from PyQt6.QtWidgets import QMessageBox
+    from ai_manager.ui.main_window import MainWindow
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Discard
+    )
+    prepare = getattr(request, "param", None)
+    if prepare is not None:
+        prepare(five_app_workspace, monkeypatch)
+    window = MainWindow(workspace_root=five_app_workspace)
+    qtbot.addWidget(window)
+    window.thread_pool = MagicMock()
+    monkeypatch.setattr(window.supervisor_manager, "restart_service", MagicMock())
+    return window
