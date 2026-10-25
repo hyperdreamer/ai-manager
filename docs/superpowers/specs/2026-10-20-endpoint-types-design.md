@@ -576,6 +576,13 @@ so the design stays at architecture altitude without losing a requirement.
    backs population, matching and selection.
 7. **Fetch propagation.** `ModelFetchRequest.endpoint` is filled from the draft in the view and
    consumed by the fetcher.
+8. **Commit outcome.** `replace_all()` returning is the commit point; a later transaction-cleanup
+   failure is a distinct `CommittedWriteError` carrying the installed digest (committed with
+   recovery required), and a cleanup failure while unwinding must not replace the primary
+   `TransactionError` report.
+9. **Restart completion.** Terminal completion includes `QProcess` `FailedToStart` without a
+   `finished` signal, via an exactly-once `SupervisorManager` bridge that also clears saved-restart
+   pending state; otherwise a missing launcher leaves capability stale and the pending flag stuck.
 
 ## Testing strategy
 
