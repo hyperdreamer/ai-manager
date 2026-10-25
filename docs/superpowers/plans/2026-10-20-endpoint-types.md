@@ -2030,6 +2030,3 @@ git commit -m "docs: explain application protocol scope and capability checks"
 ```
 
 The final implementation review response includes both successful acceptance commands, test counts, transaction/restart fault results and per-mechanism red assertion evidence; it does not claim that a historical version number proves capability.
-
-
-
