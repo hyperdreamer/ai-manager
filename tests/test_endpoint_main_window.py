@@ -1035,6 +1035,32 @@ def test_stale_save_uses_llm_recovery_and_retains_external_bytes(endpoint_window
     assert not view._save_only_btn.isEnabled() and not view._save_restart_btn.isEnabled()
     stale_dialog.assert_not_called()
     assert not list(path.parent.glob("*.bak"))
+    support = supported()
+    token = 1
+    generation = capability.protocol_support_generation(app_id)
+    window._protocol_probe_tokens[app_id] = token
+    window._on_protocol_probe_finished(app_id, token, generation, support)
+    assert window._load_failed[app_id]
+    assert view._config_error_label.text() == (
+        "Configuration changed on disk; save refused. Reload the configuration before saving."
+    )
+    assert window._protocol_support[app_id] is support
+    assert view._protocol_support is support
+
+    question = Mock(return_value=QMessageBox.StandardButton.Discard)
+    monkeypatch.setattr(mw.QMessageBox, "question", question)
+    window._reload_config(app_id)
+    question.assert_called_once()
+    assert window._snapshots[app_id].sha256 == sha256(external).digest()
+    assert window._snapshots[app_id].api_base_present is True
+    assert window._draft_configs[app_id] == view.get_current_draft()
+    assert view.get_current_draft().endpoint == "/v1/messages"
+    assert not window._load_failed[app_id]
+    assert not window._baseline_conflict[app_id]
+    assert view._save_only_btn.isEnabled() and view._save_restart_btn.isEnabled()
+    assert not window._is_dirty(app_id)
+    assert window._protocol_support[app_id] is support
+    assert view._protocol_support is support
     window.supervisor_manager.restart_service.assert_not_called()
 
 
@@ -1186,3 +1212,267 @@ def test_primary_unknown_transaction_error_survives_cleanup_at_save_seam(endpoin
     assert not view._reload_btn.isHidden()
     assert view._config_error_label.text() == str(primary)
     window.supervisor_manager.restart_service.assert_not_called()
+@pytest.mark.parametrize("answer,discard", [
+    (QMessageBox.StandardButton.Cancel, False),
+    (QMessageBox.StandardButton.Discard, True),
+])
+def test_changed_digest_pending_reload_requires_confirmation(
+    endpoint_window, monkeypatch, answer, discard
+):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    view = window.views[app_id]
+    view._model_combo.setCurrentText("pending")
+    before = window._snapshots[app_id]
+    pending = view.get_current_draft()
+    window._load_failed[app_id] = True
+    path = window.apps[app_id].relative_path / "config.yaml"
+    path.write_text("ai: {api_base: 'https://new', model: external, endpoint: /v1/messages}\n")
+    question = Mock(return_value=answer)
+    monkeypatch.setattr(mw.QMessageBox, "question", question)
+
+    window._reload_config(app_id)
+
+    question.assert_called_once()
+    assert "Reload configuration" in question.call_args.args
+    assert "Reload configuration and discard unsaved changes?" in question.call_args.args
+    if discard:
+        assert window._snapshots[app_id].sha256 == sha256(path.read_bytes()).digest()
+        assert view.get_current_draft().model == "external"
+        assert not window._is_dirty(app_id)
+        assert not window._load_failed[app_id]
+    else:
+        assert window._snapshots[app_id] is before
+        assert window._draft_configs[app_id] == pending == view.get_current_draft()
+        assert window._load_failed[app_id]
+    question.side_effect = None
+    question.return_value = QMessageBox.StandardButton.Discard
+
+
+
+def test_same_digest_reload_preserves_pending_edits(endpoint_window, monkeypatch):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    view = window.views[app_id]
+    view._model_combo.setCurrentText("pending-model")
+    before = window._snapshots[app_id]
+    pending = view.get_current_draft()
+    window._load_failed[app_id] = True
+    question = Mock(side_effect=AssertionError("same digest must not prompt"))
+    writer = Mock(side_effect=AssertionError("reload writes"))
+    monkeypatch.setattr(mw.QMessageBox, "question", question)
+    monkeypatch.setattr(mw, "write_app_config", writer)
+
+    window._reload_config(app_id)
+
+    assert window._snapshots[app_id] is not before
+    assert window._snapshots[app_id].sha256 == before.sha256
+    assert window._draft_configs[app_id] == pending == view.get_current_draft()
+    assert not window._load_failed[app_id]
+    assert view._save_only_btn.isEnabled() and view._save_restart_btn.isEnabled()
+    question.assert_not_called()
+    writer.assert_not_called()
+    question.side_effect = None
+    question.return_value = QMessageBox.StandardButton.Discard
+
+
+
+def test_changed_digest_clean_reload_installs_without_confirmation(endpoint_window, monkeypatch):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    path = window.apps[app_id].relative_path / "config.yaml"
+    path.write_text("ai: {api_base: 'https://new', model: external, endpoint: /v1/messages}\n")
+    question = Mock(side_effect=AssertionError("clean reload must not prompt"))
+    monkeypatch.setattr(mw.QMessageBox, "question", question)
+
+    window._reload_config(app_id)
+
+    incoming_digest = sha256(path.read_bytes()).digest()
+    view_draft = window.views[app_id].get_current_draft()
+    assert window._snapshots[app_id].sha256 == incoming_digest
+    assert window._draft_configs[app_id] == view_draft
+    assert view_draft.model == "external" and view_draft.endpoint == "/v1/messages"
+    assert not window._is_dirty(app_id)
+    assert not window._load_failed[app_id]
+    question.assert_not_called()
+    question.side_effect = None
+    question.return_value = QMessageBox.StandardButton.Discard
+
+
+@pytest.mark.parametrize("answer,discard", [
+    (QMessageBox.StandardButton.Cancel, False),
+    (QMessageBox.StandardButton.Discard, True),
+])
+def test_equal_digest_conflict_requires_confirmation(endpoint_window, monkeypatch, answer, discard):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    view = window.views[app_id]
+    view._model_combo.setCurrentText("pending")
+    before = window._snapshots[app_id]
+    pending = view.get_current_draft()
+    conflicts = ("endpoint",)
+    window._baseline_conflict[app_id] = conflicts
+    view.set_recovery_state(load_failed=False, conflicts=conflicts)
+    question = Mock(return_value=answer)
+    monkeypatch.setattr(mw.QMessageBox, "question", question)
+
+    window._reload_config(app_id)
+
+    question.assert_called_once()
+    if discard:
+        assert window._snapshots[app_id] is not before
+        assert window._snapshots[app_id].sha256 == before.sha256
+        assert window._draft_configs[app_id] == view.get_current_draft() == before.config
+        assert window._baseline_conflict[app_id] == ()
+        assert not window._load_failed[app_id]
+        assert view._save_only_btn.isEnabled() and view._save_restart_btn.isEnabled()
+    else:
+        assert window._snapshots[app_id] is before
+        assert window._draft_configs[app_id] == pending == view.get_current_draft()
+        assert window._baseline_conflict[app_id] == conflicts
+        assert not view._save_only_btn.isEnabled() and not view._save_restart_btn.isEnabled()
+    question.side_effect = None
+    question.return_value = QMessageBox.StandardButton.Discard
+
+
+@pytest.mark.parametrize("failure", ["read", "display", "copy"])
+def test_failed_llm_reload_retains_owned_state_and_pending_widgets(
+    endpoint_window, monkeypatch, failure
+):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    view = window.views[app_id]
+    view._model_combo.setCurrentText("pending")
+    references = tuple(store[app_id] for store in (
+        window._snapshots, window._saved_configs, window._draft_configs
+    ))
+    values = tuple(copy.deepcopy(value) for value in references)
+    pending = view.get_current_draft()
+    question = Mock(side_effect=AssertionError("failed reload must not prompt"))
+    monkeypatch.setattr(mw.QMessageBox, "question", question)
+    if failure == "read":
+        monkeypatch.setattr(mw, "read_app_config_snapshot", Mock(side_effect=RuntimeError("read fixture")))
+    elif failure == "display":
+        monkeypatch.setattr(view, "load_config", Mock(side_effect=RuntimeError("display fixture")))
+    else:
+        original = mw.copy.deepcopy
+        def fail_copy(value, *args, **kwargs):
+            if isinstance(value, AppAIConfig):
+                raise RecursionError("copy fixture")
+            return original(value, *args, **kwargs)
+        monkeypatch.setattr(mw.copy, "deepcopy", fail_copy)
+
+    window._reload_config(app_id)
+
+    current = tuple(store[app_id] for store in (
+        window._snapshots, window._saved_configs, window._draft_configs
+    ))
+    assert all(now is old for now, old in zip(current, references))
+    assert current == values
+    assert window._load_failed[app_id]
+    assert view.get_current_draft() == pending
+    assert not view._save_only_btn.isEnabled() and not view._save_restart_btn.isEnabled()
+    assert not view._reload_btn.isHidden()
+    question.assert_not_called()
+    question.side_effect = None
+    question.return_value = QMessageBox.StandardButton.Discard
+
+
+@pytest.mark.parametrize("endpoint_window", [broken_read], indirect=True)
+def test_initial_failed_llm_reload_installs_snapshot_without_creating(
+    endpoint_window, monkeypatch
+):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    path = window.apps[app_id].relative_path / "config.yaml"
+    path.write_text("ai: {model: recovered}\n")
+    assert app_id not in window._snapshots
+    assert window._load_failed[app_id]
+    question = Mock(side_effect=AssertionError("initial reload must not prompt"))
+    monkeypatch.setattr(mw.QMessageBox, "question", question)
+
+    window._reload_config(app_id)
+
+    assert window._snapshots[app_id].config.model == "recovered"
+    assert window._draft_configs[app_id] == window.views[app_id].get_current_draft()
+    assert not window._load_failed[app_id]
+    assert window.views[app_id]._save_only_btn.isEnabled()
+    question.assert_not_called()
+    question.side_effect = None
+    question.return_value = QMessageBox.StandardButton.Discard
+
+
+
+def test_failed_llm_reload_does_not_copy_example(endpoint_window, monkeypatch):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    meta = window.apps[app_id]
+    path = meta.relative_path / meta.config_file_name
+    example = meta.relative_path / meta.example_config_file_name
+    path.unlink()
+    view = window.views[app_id]
+    view._model_combo.setCurrentText("pending")
+    old = window._snapshots[app_id]
+    pending = view.get_current_draft()
+    question = Mock(side_effect=AssertionError("read failure must not prompt"))
+    monkeypatch.setattr(mw.QMessageBox, "question", question)
+
+    window._reload_config(app_id)
+
+    assert not path.exists() and example.exists()
+    assert window._snapshots[app_id] is old
+    assert window._draft_configs[app_id] == pending == view.get_current_draft()
+    assert window._load_failed[app_id]
+    question.assert_not_called()
+    question.side_effect = None
+    question.return_value = QMessageBox.StandardButton.Discard
+
+
+
+def test_committed_failure_reload_retains_installed_snapshot_until_read_succeeds(
+    endpoint_window, monkeypatch
+):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    meta, view = window.apps[app_id], window.views[app_id]
+    path = meta.relative_path / meta.config_file_name
+    view._model_combo.setEditText("committed-reload")
+    candidate = view.get_current_draft()
+    actual_writer = mw.write_app_config
+
+    def writer(metadata, value, *, baseline, expected_sha256):
+        digest = actual_writer(metadata, value, baseline=baseline, expected_sha256=expected_sha256)
+        raise CommittedWriteError(
+            path,
+            digest,
+            TransactionReport(phase="complete", files={path: "new"}, committed=True),
+            OSError("reload fixture"),
+        )
+
+    monkeypatch.setattr(mw, "write_app_config", writer)
+    window._on_save_requested(app_id, candidate, False)
+    installed = window._snapshots[app_id]
+    assert window._load_failed[app_id]
+
+    question = Mock(side_effect=AssertionError("failed read must not prompt"))
+    monkeypatch.setattr(mw.QMessageBox, "question", question)
+    monkeypatch.setattr(
+        mw,
+        "read_app_config_snapshot",
+        Mock(side_effect=ConfigError("temporary reload failure")),
+    )
+    window._reload_config(app_id)
+    assert window._snapshots[app_id] is installed
+    assert window._draft_configs[app_id] == candidate
+    assert window._load_failed[app_id]
+    question.assert_not_called()
+    question.side_effect = None
+    question.return_value = QMessageBox.StandardButton.Discard
+
+    monkeypatch.setattr(mw, "read_app_config_snapshot", read_app_config_snapshot)
+    window._reload_config(app_id)
+    assert window._snapshots[app_id] is not installed
+    assert window._snapshots[app_id].sha256 == sha256(path.read_bytes()).digest()
+    assert window._draft_configs[app_id] == view.get_current_draft()
+    assert not window._load_failed[app_id]
+    assert view._save_only_btn.isEnabled() and view._save_restart_btn.isEnabled()

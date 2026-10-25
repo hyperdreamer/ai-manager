@@ -338,7 +338,10 @@ def test_stale_actions_do_not_force_overwrite(window, monkeypatch, choice):
 def test_missing_explicit_create_invalid_raw_and_failed_reload_protect_draft(window, monkeypatch):
     path = window.apps["chat2api"].relative_path / "config.json"
     path.unlink()
+    llm_reader = MagicMock(side_effect=AssertionError("structured reload used LLM reader"))
+    monkeypatch.setattr(mw, "read_app_config_snapshot", llm_reader)
     window._reload_config("chat2api")
+    llm_reader.assert_not_called()
     view = window.views["chat2api"]
     assert not window.has_unsaved_changes() and not view._save_only_btn.isEnabled()
     assert "chat2api" not in window.sidebar._configured_ports

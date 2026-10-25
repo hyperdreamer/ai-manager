@@ -401,7 +401,82 @@ class MainWindow(QMainWindow):
         )
         self._set_dirty_indicator(app_id)
 
+    def _install_llm_reload(
+        self, app_id: str, snapshot: ConfigSnapshot, draft: AppAIConfig
+    ) -> None:
+        view = self.views[app_id]
+        old_snapshot = self._snapshots.get(app_id)
+        old_view_draft = None
+        try:
+            if old_snapshot is not None:
+                old_view_draft = view.get_current_draft()
+            saved = copy.deepcopy(snapshot.config)
+            editable = copy.deepcopy(draft)
+            view.load_config(snapshot)
+            view._display_draft(editable)
+        except Exception as exc:
+            # A reload is staged through the view first. Restore the previous
+            # visible baseline/draft when a widget or ownership copy rejects the
+            # incoming snapshot; the coordinator stores have not moved yet.
+            if old_snapshot is not None:
+                try:
+                    AppDetailView.load_config(view, old_snapshot)
+                    if old_view_draft is not None:
+                        AppDetailView._display_draft(view, old_view_draft)
+                except Exception:
+                    pass
+            elif old_view_draft is not None:
+                try:
+                    AppDetailView._display_draft(view, old_view_draft)
+                except Exception:
+                    pass
+            self._show_llm_load_error(app_id, exc)
+            return
+
+        self._snapshots[app_id] = snapshot
+        self._saved_configs[app_id] = saved
+        self._draft_configs[app_id] = editable
+        self._load_failed[app_id] = False
+        self._baseline_conflict[app_id] = ()
+        view.set_recovery_state(load_failed=False, conflicts=())
+        self._set_dirty_indicator(app_id)
+        self._update_auth_warnings()
+
     def _reload_config(self, app_id: str) -> None:
+        meta, view = self.apps[app_id], self.views[app_id]
+        if meta.config_kind == "llm":
+            old = self._snapshots.get(app_id)
+            try:
+                # Reloads are deliberately non-creating. The compatibility
+                # reader is reserved for the initial coordinator load.
+                incoming = read_app_config_snapshot(meta)
+            except Exception as exc:
+                self._show_llm_load_error(app_id, exc)
+                return
+
+            conflicts = self._baseline_conflict.get(app_id, ())
+            try:
+                pending = view.get_current_draft() if old is not None else None
+            except Exception as exc:
+                self._show_llm_load_error(app_id, exc)
+                return
+            changed = old is not None and incoming.sha256 != old.sha256
+            needs_discard = bool(conflicts) or (changed and pending != old.config)
+            if needs_discard:
+                answer = QMessageBox.question(
+                    self,
+                    "Reload configuration",
+                    "Reload configuration and discard unsaved changes?",
+                    QMessageBox.StandardButton.Discard
+                    | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if answer != QMessageBox.StandardButton.Discard:
+                    return
+            keep_pending = old is not None and not changed and not conflicts
+            draft = pending if keep_pending else incoming.config
+            self._install_llm_reload(app_id, incoming, draft)
+            return
         self._load_config(app_id)
         self._update_auth_warnings()
 
