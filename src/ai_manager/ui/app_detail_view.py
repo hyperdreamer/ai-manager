@@ -27,7 +27,7 @@ from ai_manager.config.models import (
     ServiceRunState,
     ServiceStatus,
 )
-from ai_manager.config.presets import DEFAULT_PRESETS
+from ai_manager.config.presets import DEFAULT_PRESETS, resolve_preset
 from ai_manager.config.protocols import (
     PROTOCOLS,
     base_conflicts_with_endpoint,
@@ -147,9 +147,6 @@ class AppDetailView(QWidget):
         preset_row = QHBoxLayout()
         preset_row.addWidget(QLabel("Preset:", self))
         self._preset_combo = QComboBox(self)
-        for preset in DEFAULT_PRESETS:
-            self._preset_combo.addItem(preset.name, preset.id)
-        self._preset_combo.currentIndexChanged.connect(self._on_preset_selected)
         preset_row.addWidget(self._preset_combo, stretch=1)
 
         self._fetch_btn = QPushButton("🔄 Fetch Available Models", self)
@@ -174,6 +171,16 @@ class AppDetailView(QWidget):
             self._capability_notice.setWordWrap(True)
             self._capability_notice.setStyleSheet("color: #f59e0b;")
             p_layout.addWidget(self._capability_notice)
+
+        for preset_id in (preset.id for preset in DEFAULT_PRESETS):
+            preset = resolve_preset(preset_id)
+            if preset is None or (preset.endpoint is not None and (
+                not self.app_meta.supports_protocol_selection or self._protocol_combo is None
+            )):
+                continue
+            self._preset_combo.addItem(preset.name, preset.id)
+        self._preset_combo.currentIndexChanged.connect(self._on_preset_selected)
+        self._preset_combo.activated.connect(self._on_preset_selected)
 
         # Base URL
         p_layout.addWidget(QLabel("API Base URL:", self))
@@ -332,8 +339,12 @@ class AppDetailView(QWidget):
             matched = False
             for idx in range(self._preset_combo.count()):
                 preset_id = self._preset_combo.itemData(idx)
-                if any(p.id == preset_id and p.api_base.rstrip("/") == draft.api_base.rstrip("/")
-                       for p in DEFAULT_PRESETS):
+                preset = resolve_preset(preset_id)
+                if (preset is not None
+                        and preset.api_base.rstrip("/") == draft.api_base.rstrip("/")
+                        and (preset.endpoint is None or (
+                            preset.endpoint == draft.endpoint and draft.endpoint_raw is None
+                        ))):
                     self._preset_combo.setCurrentIndex(idx)
                     matched = True
                     break
@@ -652,10 +663,12 @@ class AppDetailView(QWidget):
 
     def _on_fetch_clicked(self) -> None:
         self._fetch_token += 1
+        draft = self.get_current_draft()
         req = ModelFetchRequest(
             token=self._fetch_token,
-            api_base=self._base_url_edit.text().strip(),
-            api_key=self._key_edit.text().strip(),
+            api_base=draft.api_base,
+            api_key=draft.api_key,
+            endpoint=draft.endpoint,
             app_id=self.app_meta.id,
         )
         self._fetch_status_label.setText("Fetching models from provider...")
@@ -665,14 +678,24 @@ class AppDetailView(QWidget):
     def _on_preset_selected(self) -> None:
         if self._is_loading:
             return
-        preset_id = self._preset_combo.currentData()
-        for p in DEFAULT_PRESETS:
-            if p.id == preset_id:
-                if p.id != "custom":
-                    self._base_url_edit.setText(p.api_base)
-                    if p.default_key_env_var:
-                        self._key_edit.setText(f"${p.default_key_env_var}")
-                break
+        preset = resolve_preset(self._preset_combo.currentData())
+        if preset is not None:
+            self._apply_preset(preset)
+
+    def _apply_preset(self, preset: ProviderPreset) -> None:
+        if preset.id == "custom":
+            return
+        before = self.get_current_draft()
+        values = before.model_dump()
+        values["api_base"] = preset.api_base
+        if preset.default_key_env_var:
+            values["api_key"] = f"${preset.default_key_env_var}"
+        if preset.endpoint is not None:
+            values["endpoint"], values["endpoint_raw"] = preset.endpoint, None
+        after = AppAIConfig.model_validate(values)
+        self._display_draft(after)
+        if before != after:
+            self.config_changed.emit(self.app_meta.id, after)
 
     def _on_split_toggled(self, checked: bool) -> None:
         self._split_box.setVisible(checked)

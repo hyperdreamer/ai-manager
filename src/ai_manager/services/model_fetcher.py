@@ -49,7 +49,10 @@ def fetch_models_sync(request: ModelFetchRequest) -> ModelFetchResponse:
         "Accept": "application/json",
         "User-Agent": "ai-manager/0.1.0",
     }
-    if resolved_key:
+    if request.endpoint == "/v1/messages":
+        headers["x-api-key"] = resolved_key or ""
+        headers["anthropic-version"] = "2023-06-01"
+    elif resolved_key:
         headers["Authorization"] = f"Bearer {resolved_key}"
 
     timeout = httpx.Timeout(10.0, connect=5.0)
@@ -109,7 +112,7 @@ class ModelFetchWorker(QRunnable):
 
     def __init__(self, request: ModelFetchRequest):
         super().__init__()
-        self.request = request
+        self.request = ModelFetchRequest.model_validate(request.model_dump())
         self.signals = ModelFetchSignals()
 
     def run(self):

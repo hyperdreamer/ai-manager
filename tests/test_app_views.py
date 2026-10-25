@@ -1,11 +1,14 @@
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from PyQt6.QtCore import QSignalBlocker, Qt
 from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QTabWidget
 
 from ai_manager.config.app_registry import get_managed_apps
-from ai_manager.config.models import AppAIConfig, ServiceRunState, ServiceStatus
+from ai_manager.config.models import AppAIConfig, ModelFetchResponse, ServiceRunState, ServiceStatus
+from ai_manager.config import presets as preset_module, yaml_manager
+from ai_manager.ui import app_detail_view as detail_module
 from ai_manager.config.protocols import ENDPOINT_VALUES
 from ai_manager.services.protocol_capability import ProtocolSupport, ProtocolSupportStatus
 from tests.endpoint_helpers import meta_for, snapshot
@@ -823,3 +826,273 @@ def test_model_refresh_preserves_blank_and_pending_models_without_dirty_event(qt
     view.set_available_models(["discovered"])
     draft = view.get_current_draft()
     assert (draft.ocr_model, draft.text_model) == (None, None) and events == []
+
+
+def test_preset_resolver_drives_population_matching_and_application(qtbot, tmp_path, monkeypatch):
+    resolved = preset_module.DEFAULT_PRESETS[3].model_copy(update={
+        "name": "Resolved provider", "api_base": "https://resolved",
+        "default_key_env_var": "RESOLVED", "endpoint": "/v1/responses",
+    })
+    calls = []
+    original = preset_module.resolve_preset
+
+    def resolve(preset_id, **kwargs):
+        calls.append(preset_id)
+        return resolved if preset_id == "openai_official" else original(preset_id, **kwargs)
+
+    monkeypatch.setattr(detail_module, "resolve_preset", resolve)
+    view = AppDetailView(meta_for(tmp_path))
+    qtbot.addWidget(view)
+    assert calls == [preset.id for preset in preset_module.DEFAULT_PRESETS]
+    index = view._preset_combo.findData("openai_official")
+    assert view._preset_combo.itemText(index) == "Resolved provider"
+    calls.clear()
+    events = []
+    view.config_changed.connect(lambda *args: events.append(args))
+    loaded = AppAIConfig(api_base="https://resolved/", endpoint="/v1/responses", model="keep")
+    view.load_config(snapshot(loaded))
+    assert view._preset_combo.currentData() == "openai_official"
+    assert "openai_official" in calls and events == []
+    assert view.get_current_draft() == loaded
+    view._base_url_edit.setText("https://edited")
+    view._key_edit.setText("edited")
+    view._protocol_combo.setCurrentIndex(1)
+    calls.clear()
+    events.clear()
+    view._preset_combo.activated.emit(index)
+    expected = AppAIConfig(
+        api_base="https://resolved", api_key="$RESOLVED", endpoint="/v1/responses", model="keep",
+    )
+    assert view.get_current_draft() == expected
+    assert calls[0] == "openai_official"
+    assert events == [(view.app_meta.id, expected)]
+
+
+@pytest.mark.parametrize("endpoint,raw,selected", [
+    ("/v1/messages", None, "anthropic_official"),
+    ("/v1/responses", None, "custom"),
+    (None, "'/bad'", "custom"),
+    (None, None, "custom"),
+])
+def test_pinned_preset_matches_base_and_valid_endpoint_silently(
+    qtbot, tmp_path, endpoint, raw, selected
+):
+    view = AppDetailView(meta_for(tmp_path))
+    qtbot.addWidget(view)
+    events = []
+    view.config_changed.connect(lambda *args: events.append(args))
+    config = AppAIConfig(api_base="https://api.anthropic.com///", endpoint=endpoint, endpoint_raw=raw)
+    view.load_config(snapshot(config))
+    assert view._preset_combo.currentData() == selected
+    assert view.get_current_draft() == config and not view._protocol_edited
+    assert events == []
+
+
+@pytest.mark.parametrize("endpoint,raw", [("/v1/messages", None), (None, "'/bad'")])
+def test_endpoint_free_matching_is_base_only_without_applying_key(qtbot, tmp_path, endpoint, raw):
+    view = AppDetailView(meta_for(tmp_path))
+    qtbot.addWidget(view)
+    config = AppAIConfig(
+        api_base="https://api.openai.com/", api_key="keep", endpoint=endpoint, endpoint_raw=raw,
+    )
+    events = []
+    view.config_changed.connect(lambda *args: events.append(args))
+    view.load_config(snapshot(config))
+    assert view._preset_combo.currentData() == "openai_official"
+    assert view.get_current_draft() == config and events == []
+
+
+@pytest.mark.parametrize("app", ["ai-grammar", "textkit", "yt2txt"])
+def test_preset_order_filters_only_endpoint_bearing_entries_without_protocol_row(qtbot, tmp_path, app):
+    view = AppDetailView(meta_for(tmp_path, app, selectable=app != "yt2txt"))
+    qtbot.addWidget(view)
+    expected = ["one_api_local", "chat2api_local", "tencent_tokenhub", "openai_official", "custom"]
+    if app != "yt2txt":
+        expected.append("anthropic_official")
+    assert [view._preset_combo.itemData(i) for i in range(view._preset_combo.count())] == expected
+    assert (view._protocol_combo is None) == (app == "yt2txt")
+    view.set_protocol_support(ProtocolSupport(ProtocolSupportStatus.UNSUPPORTED))
+    assert [view._preset_combo.itemData(i) for i in range(view._preset_combo.count())] == expected
+
+
+def test_anthropic_preset_repairs_raw_in_one_complete_event_without_write(qtbot, tmp_path, monkeypatch):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    config = AppAIConfig(
+        api_base="https://old", api_key="old-key", endpoint_raw="'/bad'",
+        is_split_model=True, ocr_model="pending-ocr", text_model="pending-text",
+    )
+    view.load_config(snapshot(config))
+    baseline = view._snapshot
+    view.set_recovery_state(
+        load_failed=True, conflicts=("model",), message="keep recovery", detail="keep detail",
+    )
+    writer = Mock(side_effect=AssertionError("preset must not write"))
+    monkeypatch.setattr(yaml_manager, "write_app_config", writer)
+    events, saves = [], []
+    view.config_changed.connect(lambda *args: events.append(args))
+    view.save_requested.connect(lambda *args: saves.append(args))
+    view._preset_combo.setCurrentIndex(view._preset_combo.findData("anthropic_official"))
+    expected = AppAIConfig(
+        api_base="https://api.anthropic.com", api_key="$ANTHROPIC_API_KEY", endpoint="/v1/messages",
+        is_split_model=True, ocr_model="pending-ocr", text_model="pending-text",
+    )
+    assert view.get_current_draft() == expected
+    assert events == [("textkit", expected)]
+    assert view._protocol_edited and view._protocol_combo.count() == 4
+    assert view._protocol_combo.currentData() == "/v1/messages"
+    assert view._snapshot is baseline and view._current_config == config
+    assert view._load_failed and view._conflicts == ("model",)
+    assert view._config_error_label.text() == "keep recovery"
+    assert view._config_error_details.toPlainText() == "keep detail"
+    assert not view._save_only_btn.isEnabled() and not view._save_restart_btn.isEnabled()
+    assert not view._is_loading and saves == []
+    writer.assert_not_called()
+
+
+def test_current_preset_reactivation_restores_all_pinned_fields_and_is_idempotent(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path))
+    qtbot.addWidget(view)
+    view.load_config(snapshot(AppAIConfig(model="keep", endpoint="/v1/chat/completions")))
+    combo = view._preset_combo
+    index = combo.findData("anthropic_official")
+    combo.setCurrentIndex(index)
+    view._base_url_edit.setText("https://edited")
+    view._key_edit.setText("edited-key")
+    view._protocol_combo.setCurrentIndex(2)
+    events = []
+    view.config_changed.connect(lambda *args: events.append(args))
+    combo.activated.emit(index)
+    expected = AppAIConfig(
+        api_base="https://api.anthropic.com", api_key="$ANTHROPIC_API_KEY", model="keep",
+        endpoint="/v1/messages",
+    )
+    assert view.get_current_draft() == expected
+    assert combo.currentData() == "anthropic_official"
+    assert events == [(view.app_meta.id, expected)]
+    combo.currentIndexChanged.emit(index)
+    combo.activated.emit(index)
+    assert view.get_current_draft() == expected
+    assert events == [(view.app_meta.id, expected)]
+
+
+@pytest.mark.parametrize("endpoint,raw", [("/v1/responses", None), (None, "'/bad'")])
+def test_endpoint_free_preset_preserves_protocol_pair_and_intent(qtbot, tmp_path, endpoint, raw):
+    view = AppDetailView(meta_for(tmp_path))
+    qtbot.addWidget(view)
+    view.load_config(snapshot(AppAIConfig(endpoint="/v1/chat/completions")))
+    view._display_draft(AppAIConfig(
+        api_base="https://pending", api_key="pending", model="keep", endpoint=endpoint, endpoint_raw=raw,
+    ))
+    edited = view._protocol_edited
+    events = []
+    view.config_changed.connect(lambda *args: events.append(args))
+    index = view._preset_combo.findData("openai_official")
+    view._preset_combo.setCurrentIndex(index)
+    view._preset_combo.activated.emit(index)
+    expected = AppAIConfig(
+        api_base="https://api.openai.com", api_key="$OPENAI_API_KEY", model="keep",
+        endpoint=endpoint, endpoint_raw=raw,
+    )
+    assert view.get_current_draft() == expected
+    assert view._protocol_edited is edited
+    assert events == [(view.app_meta.id, expected)]
+
+
+def test_custom_unknown_and_keyless_presets_leave_unpinned_fields_alone(qtbot, tmp_path, monkeypatch):
+    view = AppDetailView(meta_for(tmp_path))
+    qtbot.addWidget(view)
+    config = AppAIConfig(api_base="https://pending", api_key="keep", model="keep", endpoint_raw="None")
+    view.load_config(snapshot(config))
+    events = []
+    view.config_changed.connect(lambda *args: events.append(args))
+    combo = view._preset_combo
+    combo.activated.emit(combo.findData("custom"))
+    combo.addItem("Unknown", "missing")
+    combo.setCurrentIndex(combo.findData("missing"))
+    combo.activated.emit(combo.currentIndex())
+    assert view.get_current_draft() == config and events == []
+    original = preset_module.resolve_preset
+    keyless = preset_module.DEFAULT_PRESETS[3].model_copy(update={"default_key_env_var": None})
+    monkeypatch.setattr(detail_module, "resolve_preset", lambda preset_id: (
+        keyless if preset_id == "openai_official" else original(preset_id)
+    ))
+    combo.setCurrentIndex(combo.findData("openai_official"))
+    expected = config.model_copy(update={"api_base": "https://api.openai.com"})
+    assert view.get_current_draft() == expected
+    assert events == [(view.app_meta.id, expected)]
+
+
+def test_preset_refresh_failure_releases_guards_and_keeps_recovery(qtbot, tmp_path, monkeypatch):
+    view = AppDetailView(meta_for(tmp_path))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+    baseline = view._snapshot
+    view.set_recovery_state(load_failed=True, message="reload fixture", detail="keep detail")
+    preset = preset_module.DEFAULT_PRESETS[3]
+    with monkeypatch.context() as patch:
+        patch.setattr(view._key_edit, "setText", Mock(side_effect=RuntimeError("preset display fixture")))
+        with pytest.raises(RuntimeError, match="preset display fixture"):
+            view._apply_preset(preset)
+    assert not view._is_loading
+    assert not any(control.signalsBlocked() for control in (
+        view._base_url_edit, view._key_edit, view._preset_combo, view._protocol_combo,
+    ))
+    events = []
+    view.config_changed.connect(lambda *args: events.append(args))
+    view._base_url_edit.setText("https://after-failure")
+    assert len(events) == 1
+    assert view._snapshot is baseline and view._load_failed
+    assert view._config_error_label.text() == "reload fixture"
+    assert view._config_error_details.toPlainText() == "keep detail"
+    assert not view._save_only_btn.isEnabled()
+
+
+@pytest.mark.parametrize("endpoint,raw", [
+    ("/v1/messages", None), (None, "'/bad'"), (None, None),
+])
+def test_fetch_uses_one_complete_current_draft_without_repair(qtbot, tmp_path, monkeypatch, endpoint, raw):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    saved = AppAIConfig(api_base="https://saved", api_key="saved", endpoint="/v1/chat/completions")
+    view.load_config(snapshot(saved))
+    draft = AppAIConfig(api_base="https://pending/", api_key="$PENDING", endpoint=endpoint, endpoint_raw=raw)
+    view._display_draft(draft)
+    baseline = view._snapshot
+    current = Mock(wraps=view.get_current_draft)
+    monkeypatch.setattr(view, "get_current_draft", current)
+    requests, events = [], []
+    view.fetch_models_requested.connect(requests.append)
+    view.config_changed.connect(lambda *args: events.append(args))
+    view._fetch_btn.click()
+    assert [request.model_dump() for request in requests] == [{
+        "token": 1, "app_id": "textkit", "api_base": "https://pending/",
+        "api_key": "$PENDING", "endpoint": endpoint,
+    }]
+    assert current.call_count == 1
+    assert view.get_current_draft() == draft and view._snapshot is baseline
+    assert events == []
+    assert view._fetch_status_label.text() == "Fetching models from provider..."
+    assert view._fetch_status_label.textFormat() == Qt.TextFormat.PlainText
+
+
+def test_fetch_model_delivery_keeps_current_pair_blank_model_and_exact_copy(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path))
+    qtbot.addWidget(view)
+    view.load_config(snapshot(AppAIConfig(api_base="https://x", endpoint_raw="'/bad'")))
+    pending = view.get_current_draft()
+    events = []
+    view.config_changed.connect(lambda *args: events.append(args))
+    view._fetch_btn.click()
+    view.on_model_fetch_response(ModelFetchResponse(
+        token=1, success=True, models=["first", "second"], endpoint_used="https://x/v1/models",
+    ))
+    assert view.get_current_draft() == pending and events == []
+    assert view._available_models == ["first", "second"]
+    assert view._fetch_status_label.text() == "✓ Fetched 2 models from https://x/v1/models"
+    view.on_model_fetch_response(ModelFetchResponse(token=0, success=False, error_message="stale"))
+    assert view._fetch_status_label.text() == "✓ Fetched 2 models from https://x/v1/models"
+    view.on_model_fetch_response(ModelFetchResponse(token=1, success=False, error_message="<failed & literal>"))
+    assert view._fetch_status_label.text() == "⚠️ <failed & literal>"
+    assert view._fetch_status_label.textFormat() == Qt.TextFormat.PlainText
+    assert view.get_current_draft() == pending and events == []

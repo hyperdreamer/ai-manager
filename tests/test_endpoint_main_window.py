@@ -6,6 +6,8 @@ from hashlib import sha256
 from unittest.mock import Mock
 
 import pytest
+import httpx
+import respx
 from PyQt6.QtCore import QEvent, QProcess, QThread, QThreadPool, Qt
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
@@ -22,6 +24,7 @@ from ai_manager.config.structured_models import TransactionReport
 from ai_manager.config.transaction import Transaction
 from ai_manager.config.protocols import ENDPOINT_VALUES
 from ai_manager.services import config_jobs as jobs
+from ai_manager.services.model_fetcher import ModelFetchWorker
 from ai_manager.services import protocol_capability as capability
 from ai_manager.services.protocol_capability import ProtocolSupport, ProtocolSupportStatus
 from ai_manager.config.yaml_manager import read_app_config_snapshot
@@ -1483,3 +1486,179 @@ def test_committed_failure_reload_retains_installed_snapshot_until_read_succeeds
     assert window._draft_configs[app_id] == view.get_current_draft()
     assert not window._load_failed[app_id]
     assert view._save_only_btn.isEnabled() and view._save_restart_btn.isEnabled()
+
+
+@pytest.mark.parametrize("status", [ProtocolSupportStatus.PARTIAL, ProtocolSupportStatus.UNVERIFIABLE])
+def test_preset_changes_draft_but_real_save_gate_still_refuses(endpoint_window, monkeypatch, status):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    view = window.views[app_id]
+    path = window.apps[app_id].relative_path / window.apps[app_id].config_file_name
+    original = path.read_bytes()
+    baseline = window._snapshots[app_id]
+    accepted = frozenset({"/v1/chat/completions"}) if status is ProtocolSupportStatus.PARTIAL else frozenset()
+    support = ProtocolSupport(status, accepted, "fixture protocol refusal")
+    view.set_protocol_support(support)
+    if status is ProtocolSupportStatus.PARTIAL:
+        assert not view._protocol_combo.model().item(3).isEnabled()
+    probe = Mock(return_value=support)
+    writer = Mock(side_effect=AssertionError("preset or gate must not write"))
+    monkeypatch.setattr(mw, "probe_protocol_support", probe)
+    monkeypatch.setattr(mw, "write_app_config", writer)
+    events = []
+    view.config_changed.connect(lambda *args: events.append(args))
+    index = view._preset_combo.findData("anthropic_official")
+    view._preset_combo.setCurrentIndex(index)
+    view._preset_combo.activated.emit(index)
+    expected = baseline.config.model_copy(update={
+        "api_base": "https://api.anthropic.com", "api_key": "$ANTHROPIC_API_KEY",
+        "endpoint": "/v1/messages", "endpoint_raw": None,
+    })
+    assert view.get_current_draft() == expected
+    assert events == [(app_id, expected)]
+    assert window._draft_configs[app_id] == expected and window._is_dirty(app_id)
+    assert window._snapshots[app_id] is baseline and path.read_bytes() == original
+    writer.assert_not_called()
+    view._save_only_btn.click()
+    expected_message = (
+        "Installed build rejected protocol /v1/messages. Update the service or select Auto."
+        if status is ProtocolSupportStatus.PARTIAL else
+        "Cannot verify this build; introducing or changing ai.endpoint is refused. "
+        "Select Auto to remove the key, or restore the saved protocol."
+    )
+    assert view._config_error_label.text() == expected_message
+    assert view._config_error_details.toPlainText() == "fixture protocol refusal"
+    assert view.get_current_draft() == window._draft_configs[app_id] == expected
+    assert window._snapshots[app_id] is baseline and path.read_bytes() == original
+    writer.assert_not_called()
+    probe.assert_called_once_with(window.apps[app_id])
+    window.supervisor_manager.restart_service.assert_not_called()
+
+
+def prepare_discovery_saved_chat(root, monkeypatch):
+    for app_id in ("ai-grammar", "textkit"):
+        meta = get_managed_apps(root)[app_id]
+        (meta.relative_path / meta.config_file_name).write_text(
+            "ai: {api_base: 'https://saved', api_key: saved-key, "
+            "endpoint: /v1/chat/completions, model: saved-model}\n",
+            encoding="utf-8",
+        )
+
+
+@pytest.mark.parametrize("endpoint_window", [prepare_discovery_saved_chat], indirect=True)
+@respx.mock
+def test_current_endpoint_flows_from_view_through_worker_to_http(endpoint_window, monkeypatch, qtbot):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    view = window.views[app_id]
+    baseline = window._snapshots[app_id]
+    assert baseline.config.endpoint == "/v1/chat/completions"
+    path = window.apps[app_id].relative_path / window.apps[app_id].config_file_name
+    original = path.read_bytes()
+    writer = Mock(side_effect=AssertionError("discovery must not write"))
+    monkeypatch.setattr(mw, "write_app_config", writer)
+    workers, requests = [], []
+    monkeypatch.setattr(window.thread_pool, "start", workers.append)
+    view.fetch_models_requested.connect(requests.append)
+    view._base_url_edit.setText("https://fixture")
+    view._key_edit.setText("literal")
+    view._model_combo.setCurrentText("")
+    view._protocol_combo.setCurrentIndex(3)
+    pending = view.get_current_draft()
+    events = []
+    view.config_changed.connect(lambda *args: events.append(args))
+    view._fetch_btn.click()
+    expected = {
+        "token": 1, "app_id": app_id, "api_base": "https://fixture", "api_key": "literal",
+        "endpoint": "/v1/messages",
+    }
+    assert [request.model_dump() for request in requests] == [expected]
+    assert len(workers) == 1 and isinstance(workers[0], ModelFetchWorker)
+    worker = workers[0]
+    assert worker.request.model_dump() == expected
+    assert worker.request is not requests[0]
+    assert id(worker) in window._model_workers
+    route = respx.get("https://fixture/v1/models").mock(return_value=httpx.Response(
+        200, json={"data": [{"id": "Z"}, {"id": "a"}, {"id": "Z"}]},
+    ))
+    worker.run()
+    qtbot.waitUntil(lambda: id(worker) not in window._model_workers)
+    headers = route.calls[0].request.headers
+    assert headers["x-api-key"] == "literal"
+    assert headers["anthropic-version"] == "2023-06-01" and "authorization" not in headers
+    assert view._available_models == ["a", "Z"]
+    assert view._fetch_status_label.text() == "✓ Fetched 2 models from https://fixture/v1/models"
+    assert view.get_current_draft() == pending == window._draft_configs[app_id]
+    assert pending.model is None and events == []
+    assert window._snapshots[app_id] is baseline and window._saved_configs[app_id] == baseline.config
+    assert view._snapshot == baseline and path.read_bytes() == original
+    writer.assert_not_called()
+    window.supervisor_manager.restart_service.assert_not_called()
+
+
+@pytest.mark.parametrize("endpoint_window", [prepare_discovery_saved_chat], indirect=True)
+@respx.mock
+def test_discovery_reverse_completions_preserve_origin_and_latest_view_token(
+    endpoint_window, monkeypatch, qtbot
+):
+    window = endpoint_window
+    grammar, textkit = window.views["ai-grammar"], window.views["textkit"]
+    workers = []
+    monkeypatch.setattr(window.thread_pool, "start", workers.append)
+    originals = {app_id: owned_state(window, app_id) for app_id in ("ai-grammar", "textkit")}
+    pending = {}
+    for app_id, view, endpoint in (
+        ("ai-grammar", grammar, "/v1/messages"), ("textkit", textkit, "/v1/responses"),
+    ):
+        view._base_url_edit.setText(f"https://{app_id}.fixture")
+        view._key_edit.setText(f"{app_id}-key")
+        view._protocol_combo.setCurrentIndex(view._protocol_combo.findData(endpoint))
+        pending[app_id] = view.get_current_draft()
+        view._fetch_btn.click()
+    assert [(worker.request.app_id, worker.request.token) for worker in workers] == [
+        ("ai-grammar", 1), ("textkit", 1),
+    ]
+    grammar._fetch_btn.click()
+    assert workers[2].request.token == 2
+    window.sidebar.select_app("yt2txt")
+    grammar_route = respx.get("https://ai-grammar.fixture/v1/models").mock(side_effect=[
+        httpx.Response(200, json=["grammar-new"]), httpx.Response(200, json=["grammar-stale"]),
+    ])
+    text_route = respx.get("https://textkit.fixture/v1/models").mock(return_value=httpx.Response(
+        200, json=["text-only"],
+    ))
+    for worker in (workers[2], workers[1], workers[0]):
+        worker.run()
+        qtbot.waitUntil(lambda: id(worker) not in window._model_workers)
+    assert grammar._available_models == ["grammar-new"]
+    assert textkit._available_models == ["text-only"]
+    assert window.views["yt2txt"]._available_models == []
+    assert grammar._fetch_token == 2 and textkit._fetch_token == 1
+    for app_id, view in (("ai-grammar", grammar), ("textkit", textkit)):
+        assert view.get_current_draft() == pending[app_id] == window._draft_configs[app_id]
+        assert window._snapshots[app_id] is originals[app_id][0][0]
+        assert window._saved_configs[app_id] == originals[app_id][1][1]
+    for call in grammar_route.calls:
+        assert call.request.headers.get("x-api-key") == "ai-grammar-key"
+        assert "authorization" not in call.request.headers
+    assert text_route.calls[0].request.headers["Authorization"] == "Bearer textkit-key"
+    assert "x-api-key" not in text_route.calls[0].request.headers
+
+
+@respx.mock
+def test_discovery_empty_draft_base_does_not_use_preview_default(endpoint_window, monkeypatch, qtbot):
+    window = endpoint_window
+    app_id = "ai-grammar"
+    config = AppAIConfig(api_base="", endpoint="/v1/messages")
+    baseline = install_saved(window, app_id, config, present=False)
+    view = window.views[app_id]
+    assert view._request_url_label.text() == "Request URL: https://api.openai.com/v1/messages"
+    workers = []
+    monkeypatch.setattr(window.thread_pool, "start", workers.append)
+    view._fetch_btn.click()
+    assert workers[0].request.api_base == ""
+    workers[0].run()
+    qtbot.waitUntil(lambda: not window._model_workers)
+    assert view._fetch_status_label.text() == "⚠️ API Base URL cannot be empty."
+    assert view.get_current_draft() == config and window._snapshots[app_id] is baseline
+    assert not respx.calls
