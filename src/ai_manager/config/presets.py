@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from typing import List
 from ai_manager.config.models import ProviderPreset
 
@@ -38,4 +39,20 @@ DEFAULT_PRESETS: List[ProviderPreset] = [
         api_base="http://127.0.0.1:8080",
         description="User-defined endpoint and API key",
     ),
+    ProviderPreset(
+        id="anthropic_official",
+        name="Official Anthropic API",
+        api_base="https://api.anthropic.com",
+        default_key_env_var="ANTHROPIC_API_KEY",
+        endpoint="/v1/messages",
+        docs_url="https://docs.anthropic.com",
+        description="Claude models over the Anthropic Messages protocol",
+    ),
 ]
+
+
+def resolve_preset(
+    preset_id: str, *, presets: Sequence[ProviderPreset] | None = None
+) -> ProviderPreset | None:
+    offered = DEFAULT_PRESETS if presets is None else presets
+    return next((preset for preset in offered if preset.id == preset_id), None)

@@ -209,9 +209,16 @@ def test_direct_app_quit_cancels_via_about_to_quit(tmp_path):
         from ai_manager.ui import main_window as mw
 
         rec = []
+        # ``sup.subprocess`` is the global subprocess module, so patching it also sees
+        # every unrelated spawn in this process - including the protocol capability
+        # probe, which legitimately runs a short-lived python child while the window
+        # is constructed. Record supervisor commands only: this assertion is about a
+        # supervisor start after quit, not about subprocess use in general.
         class Rec:
             def __call__(self, argv, *a, **k):
-                rec.append(list(argv)); return object()
+                if any("ai-backends" in str(part) for part in argv):
+                    rec.append(list(argv))
+                return object()
         sup.subprocess.Popen = Rec()
         sup.SupervisorManager.__init__ = install_fake_status_process(
             sup.SupervisorManager.__init__

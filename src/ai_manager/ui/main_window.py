@@ -1,6 +1,6 @@
 import copy
 import json
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Dict, Optional
@@ -28,6 +28,7 @@ from ai_manager.config.blast_radius import (
     urls_match,
 )
 from ai_manager.config.config_errors import (
+    CommittedWriteError,
     ConfigError,
     ConfigLoadError,
     ConfigValidationError,
@@ -41,6 +42,7 @@ from ai_manager.config.config_errors import (
 from ai_manager.config.models import (
     AppAIConfig,
     AppMetadata,
+    ConfigSnapshot,
     ModelFetchRequest,
     ModelFetchResponse,
     ServiceRunState,
@@ -49,13 +51,35 @@ from ai_manager.config.models import (
     ThemeMode,
     UserSettings,
 )
+from ai_manager.config.protocols import (
+    base_conflicts_with_endpoint,
+    compose_request_url,
+    effective_api_base,
+    is_valid_endpoint,
+)
 from ai_manager.config.structured_config import _candidate, load as load_structured, render
 from ai_manager.config.structured_models import LauncherProbeResult, SaveResult, StructuredDoc
 from ai_manager.config.structured_schema import validate_in_process
-from ai_manager.config.yaml_manager import read_app_config, write_app_config
-from ai_manager.services.config_jobs import LauncherProbeJob, StructuredSaveJob
+from ai_manager.config.yaml_manager import (
+    ensure_config_exists,
+    read_app_config_snapshot,
+    write_app_config,
+)
+from ai_manager.services.config_jobs import (
+    LauncherProbeJob,
+    ProtocolProbeDelivery,
+    ProtocolProbeJob,
+    StructuredSaveJob,
+)
 from ai_manager.services.desktop_integration import DesktopIntegrationService
 from ai_manager.services.model_fetcher import ModelFetchWorker
+from ai_manager.services.protocol_capability import (
+    ProtocolSupport,
+    ProtocolSupportStatus,
+    invalidate_protocol_support,
+    probe_protocol_support,
+    protocol_support_generation,
+)
 from ai_manager.services.supervisor import SupervisorManager
 from ai_manager.ui.about_dialog import AboutDialog
 from ai_manager.ui.app_detail_view import AppDetailView
@@ -77,6 +101,18 @@ from ai_manager.utils.path_locator import find_ai_workspace_root
 PAYLOAD_KIND_MISMATCH = (
     "Configuration draft does not match this app's config kind; save refused."
 )
+
+
+@dataclass(frozen=True)
+class LLMGateResult:
+    refused: bool = False
+    no_op: bool = False
+    message: str = ""
+    detail: str = ""
+
+    def __post_init__(self) -> None:
+        if self.refused and self.no_op:
+            raise ValueError("A refused save cannot be a no-op.")
 
 
 def get_settings_file_path() -> Path:
@@ -124,8 +160,15 @@ class MainWindow(QMainWindow):
         # ``AppAIConfig`` for LLM apps and a ``StructuredDoc`` otherwise.
         self._saved_configs: Dict[str, object] = {}
         self._draft_configs: Dict[str, object] = {}
+        self._snapshots: dict[str, ConfigSnapshot] = {}
+        self._load_failed: dict[str, bool] = {}
+        self._baseline_conflict: dict[str, tuple[str, ...]] = {}
         self._launcher_gate_cache: Dict[Path, Optional[LauncherProbeResult]] = {}
         self._probe_jobs: Dict[Path, LauncherProbeJob] = {}
+        self._protocol_probe_tokens: dict[str, int] = {}
+        self._protocol_probe_jobs: dict[tuple[str, int], ProtocolProbeJob] = {}
+        self._protocol_probe_deliveries: dict[tuple[str, int], ProtocolProbeDelivery] = {}
+        self._protocol_support: dict[str, ProtocolSupport] = {}
         self._save_jobs: Dict[str, StructuredSaveJob] = {}
         self._model_workers: Dict[int, ModelFetchWorker] = {}
         self._pending_restarts: Dict[str, bool] = {}
@@ -163,6 +206,7 @@ class MainWindow(QMainWindow):
         self._init_ui()
         self._load_all_configs()
         self._start_launcher_probes()
+        self._start_protocol_probes()
         self._apply_theme(self.settings.theme)
 
         # Polling Timer
@@ -257,6 +301,8 @@ class MainWindow(QMainWindow):
             view.save_requested.connect(self._on_save_requested)
             view.restart_requested.connect(self._on_restart_requested)
             view.fetch_models_requested.connect(self._on_fetch_models)
+            if meta.config_kind == "llm":
+                view.reload_requested.connect(self._reload_config)
             self.views[app_id] = view
             self.stack.addWidget(view)
 
@@ -275,9 +321,24 @@ class MainWindow(QMainWindow):
         meta, view = self.apps[app_id], self.views[app_id]
         if meta.config_kind == "llm":
             try:
-                config = read_app_config(meta)
-            except Exception:
-                config = AppAIConfig()
+                # Only the initial coordinator load may create from an example.
+                if app_id not in self._load_failed:
+                    ensure_config_exists(meta)
+                snapshot = read_app_config_snapshot(meta)
+                saved = copy.deepcopy(snapshot.config)
+                draft = copy.deepcopy(snapshot.config)
+                view.load_config(snapshot)
+            except Exception as exc:
+                self._show_llm_load_error(app_id, exc)
+                return
+            self._snapshots[app_id] = snapshot
+            self._saved_configs[app_id] = saved
+            self._draft_configs[app_id] = draft
+            self._load_failed[app_id] = False
+            self._baseline_conflict.setdefault(app_id, ())
+            view.set_recovery_state(load_failed=False, conflicts=self._baseline_conflict[app_id])
+            self._set_dirty_indicator(app_id)
+            return
         elif meta.config_kind in ("chat2api", "file-bridge"):
             try:
                 config = load_structured(
@@ -333,7 +394,94 @@ class MainWindow(QMainWindow):
         self._update_configured_port(app_id, config)
         self._set_dirty_indicator(app_id)
 
+    def _show_llm_load_error(self, app_id: str, error: Exception) -> None:
+        meta = self.apps[app_id]
+        failure = error if isinstance(error, ConfigLoadError) else ConfigLoadError(
+            meta.relative_path / meta.config_file_name, str(error)
+        )
+        self._load_failed[app_id] = True
+        self.views[app_id].set_recovery_state(
+            load_failed=True, conflicts=self._baseline_conflict.get(app_id, ()),
+            message=str(failure), detail=failure.detail,
+        )
+        self._set_dirty_indicator(app_id)
+
+    def _install_llm_reload(
+        self, app_id: str, snapshot: ConfigSnapshot, draft: AppAIConfig
+    ) -> None:
+        view = self.views[app_id]
+        old_snapshot = self._snapshots.get(app_id)
+        old_view_draft = None
+        try:
+            if old_snapshot is not None:
+                old_view_draft = view.get_current_draft()
+            saved = copy.deepcopy(snapshot.config)
+            editable = copy.deepcopy(draft)
+            view.load_config(snapshot)
+            view._display_draft(editable)
+        except Exception as exc:
+            # A reload is staged through the view first. Restore the previous
+            # visible baseline/draft when a widget or ownership copy rejects the
+            # incoming snapshot; the coordinator stores have not moved yet.
+            if old_snapshot is not None:
+                try:
+                    AppDetailView.load_config(view, old_snapshot)
+                    if old_view_draft is not None:
+                        AppDetailView._display_draft(view, old_view_draft)
+                except Exception:
+                    pass
+            elif old_view_draft is not None:
+                try:
+                    AppDetailView._display_draft(view, old_view_draft)
+                except Exception:
+                    pass
+            self._show_llm_load_error(app_id, exc)
+            return
+
+        self._snapshots[app_id] = snapshot
+        self._saved_configs[app_id] = saved
+        self._draft_configs[app_id] = editable
+        self._load_failed[app_id] = False
+        self._baseline_conflict[app_id] = ()
+        view.set_recovery_state(load_failed=False, conflicts=())
+        self._set_dirty_indicator(app_id)
+        self._update_auth_warnings()
+
     def _reload_config(self, app_id: str) -> None:
+        meta, view = self.apps[app_id], self.views[app_id]
+        if meta.config_kind == "llm":
+            old = self._snapshots.get(app_id)
+            try:
+                # Reloads are deliberately non-creating. The compatibility
+                # reader is reserved for the initial coordinator load.
+                incoming = read_app_config_snapshot(meta)
+            except Exception as exc:
+                self._show_llm_load_error(app_id, exc)
+                return
+
+            conflicts = self._baseline_conflict.get(app_id, ())
+            try:
+                pending = view.get_current_draft() if old is not None else None
+            except Exception as exc:
+                self._show_llm_load_error(app_id, exc)
+                return
+            changed = old is not None and incoming.sha256 != old.sha256
+            needs_discard = bool(conflicts) or (changed and pending != old.config)
+            if needs_discard:
+                answer = QMessageBox.question(
+                    self,
+                    "Reload configuration",
+                    "Reload configuration and discard unsaved changes?",
+                    QMessageBox.StandardButton.Discard
+                    | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if answer != QMessageBox.StandardButton.Discard:
+                    return
+            keep_pending = old is not None and not changed and not conflicts
+            draft = pending if keep_pending else incoming.config
+            self._install_llm_reload(app_id, incoming, draft)
+            return
         self._load_config(app_id)
         self._update_auth_warnings()
 
@@ -414,9 +562,78 @@ class MainWindow(QMainWindow):
         except ConfigError as exc:
             self.views[app_id].show_config_error(str(exc))
             return
+        if self.apps[app_id].config_kind == "llm" and app_id not in self._snapshots:
+            return
         self._draft_configs[app_id] = copy.deepcopy(new_draft)
         self._set_dirty_indicator(app_id)
         self._update_auth_warnings()
+
+    def _evaluate_llm_gate(
+        self, app_id: str, draft: AppAIConfig, saved: AppAIConfig | None
+    ) -> LLMGateResult:
+        snap = self._snapshots.get(app_id)
+
+        def refuse(message: str, detail: str = "") -> LLMGateResult:
+            return LLMGateResult(refused=True, message=message, detail=detail)
+
+        if self._load_failed.get(app_id, False) or snap is None or saved is None:
+            return refuse("Reload the configuration before saving.")
+        conflicts = self._baseline_conflict.get(app_id, ())
+        if conflicts:
+            return refuse(
+                "Configuration changed while you were editing. Reload the configuration before saving.",
+                "Conflicting fields: " + ", ".join(conflicts) + ".",
+            )
+        if draft.endpoint is not None and not is_valid_endpoint(draft.endpoint):
+            return refuse(
+                f"Unsupported protocol value: {draft.endpoint!r}. Pick one of the three supported protocols or Auto."
+            )
+        if draft.endpoint_raw is not None:
+            return refuse(
+                "Not one of the three supported protocols. Pick a valid one, or Auto to remove the key.",
+                f"Stored ai.endpoint: {draft.endpoint_raw}",
+            )
+        canonical = AppAIConfig.model_validate(draft.model_dump())
+        saved = snap.config
+        base = effective_api_base(app_id, canonical, snap)
+        if canonical.endpoint is not None and base_conflicts_with_endpoint(base, canonical.endpoint):
+            return refuse(
+                "The protocol path already includes /v1. Enter the gateway prefix, e.g. https://api.openai.com.",
+                "Request URL: " + compose_request_url(app_id, base, canonical.endpoint),
+            )
+        if canonical == saved:
+            return LLMGateResult(no_op=True)
+        if canonical.endpoint is None and saved.endpoint is not None:
+            return LLMGateResult()
+        if canonical.endpoint == saved.endpoint:
+            return LLMGateResult()
+        meta = self.apps[app_id]
+        if not meta.supports_protocol_selection:
+            return refuse("Protocol selection is not available for this application.")
+        support = probe_protocol_support(meta)
+        self._protocol_support[app_id] = support
+        self.views[app_id].set_protocol_support(support)
+        if canonical.endpoint in support.accepted:
+            return LLMGateResult()
+        if support.status is not ProtocolSupportStatus.UNVERIFIABLE:
+            return refuse(
+                f"Installed build rejected protocol {canonical.endpoint}. Update the service or select Auto.",
+                support.detail,
+            )
+        return refuse(
+            "Cannot verify this build; introducing or changing ai.endpoint is refused. Select Auto to remove the key, or restore the saved protocol.",
+            support.detail,
+        )
+
+    def _committed_llm_snapshot(
+        self, prepared: ConfigSnapshot, digest: bytes
+    ) -> ConfigSnapshot:
+        if type(digest) is not bytes or len(digest) != 32:
+            raise ValueError("Snapshot digest must be a 32-byte SHA-256 value.")
+        # All deep ownership was prepared before the writer's commit point.
+        snapshot = copy.copy(prepared)
+        object.__setattr__(snapshot, "sha256", digest)
+        return snapshot
 
     def _on_save_requested(self, app_id: str, config: object, should_restart: bool) -> None:
         if app_id in self._save_jobs:
@@ -427,12 +644,56 @@ class MainWindow(QMainWindow):
             if meta.config_kind == "llm":
                 if not isinstance(config, AppAIConfig):
                     raise ConfigError(PAYLOAD_KIND_MISMATCH)
-                write_app_config(meta, config)
-                self._saved_configs[app_id] = config.model_copy(deep=True)
-                self._draft_configs[app_id] = config.model_copy(deep=True)
-                view.adopt_saved_baseline(config, preserve_draft=False)
-                self._set_dirty_indicator(app_id)
-                self._update_auth_warnings()
+                snap = self._snapshots.get(app_id)
+                result = self._evaluate_llm_gate(
+                    app_id, config, self._saved_configs.get(app_id)
+                )
+                if result.refused:
+                    view.show_config_error(result.message, result.detail)
+                    return
+                if result.no_op:
+                    if should_restart:
+                        self._request_saved_restart(app_id)
+                    else:
+                        view.show_config_error("Configuration saved.")
+                    return
+                candidate = AppAIConfig.model_validate(config.model_dump())
+                saved_copy = candidate.model_copy(deep=True)
+                draft_copy = candidate.model_copy(deep=True)
+                present = snap.api_base_present or candidate.api_base != snap.config.api_base
+                prepared = ConfigSnapshot(candidate, snap.sha256, present)
+                committed_error = None
+                try:
+                    installed = write_app_config(
+                        meta, candidate, baseline=snap.config, expected_sha256=snap.sha256
+                    )
+                except CommittedWriteError as exc:
+                    installed, committed_error = exc.installed_sha256, exc
+                snapshot = self._committed_llm_snapshot(prepared, installed)
+                self._snapshots[app_id] = snapshot
+                self._saved_configs[app_id] = saved_copy
+                self._draft_configs[app_id] = draft_copy
+                if committed_error is not None:
+                    self._load_failed[app_id] = True
+                    view.set_recovery_state(
+                        load_failed=True, conflicts=self._baseline_conflict.get(app_id, ()),
+                        message="Configuration saved, but the file must be reloaded before another save.",
+                        detail=str(committed_error.cause),
+                    )
+                    self._set_dirty_indicator(app_id)
+                    return
+                try:
+                    view.load_config(snapshot)
+                    self._set_dirty_indicator(app_id)
+                    self._update_auth_warnings()
+                except Exception as exc:
+                    self._load_failed[app_id] = True
+                    view.set_recovery_state(
+                        load_failed=True, conflicts=self._baseline_conflict.get(app_id, ()),
+                        message="Configuration saved, but the file must be reloaded before another save.",
+                        detail=str(exc),
+                    )
+                    return
                 if should_restart:
                     self._request_saved_restart(app_id)
                 else:
@@ -514,15 +775,13 @@ class MainWindow(QMainWindow):
         return tuple(match for match in matches if match.meta.id in selected_ids)
 
     def _on_restart_requested(self, app_id: str) -> None:
-        # A restart writes no configuration and clears no dirty state.
-        self.supervisor_manager.restart_service(app_id)
-
-    def _request_saved_restart(self, app_id: str) -> None:
-        self._save_restart_pending.add(app_id)
-        self.supervisor_manager.restart_service(app_id)
-        if app_id in self._save_restart_pending:
-            self._save_restart_pending.discard(app_id)
-            self.views[app_id].show_config_error("Configuration saved. Restart requested.")
+        # Busy refusal is synchronous and unqualified, so carry this dispatch's origin.
+        previous = self._submitting_restart
+        self._submitting_restart = app_id
+        try:
+            self.supervisor_manager.restart_service(app_id)
+        finally:
+            self._submitting_restart = previous
 
     def _on_fetch_models(self, request: ModelFetchRequest) -> None:
         meta = self.apps.get(request.app_id)
@@ -592,6 +851,47 @@ class MainWindow(QMainWindow):
             if meta.config_kind == "chat2api" and meta.relative_path.resolve() == key:
                 self.views[other_id].set_launcher_gate(result)
 
+    def _start_protocol_probes(self) -> None:
+        """Probe participating apps only after their views and snapshots exist."""
+        for app_id, meta in self.apps.items():
+            if meta.supports_protocol_selection:
+                self._start_protocol_probe(app_id)
+
+    def _start_protocol_probe(self, app_id: str) -> None:
+        meta = self.apps.get(app_id)
+        if meta is None or not meta.supports_protocol_selection or app_id not in self.views:
+            return
+        token = self._protocol_probe_tokens.get(app_id, 0) + 1
+        generation = protocol_support_generation(app_id)
+        self._protocol_probe_tokens[app_id] = token
+        key = (app_id, token)
+        job = ProtocolProbeJob(meta, token, generation)
+        delivery = ProtocolProbeDelivery(self, app_id, token, generation)
+        self._protocol_probe_jobs[key] = job
+        self._protocol_probe_deliveries[key] = delivery
+        job.signals.probe_finished.connect(
+            delivery.finished, Qt.ConnectionType.QueuedConnection
+        )
+        self.thread_pool.start(job)
+
+    def _on_protocol_probe_finished(
+        self, app_id: str, token: int, generation: int, support: ProtocolSupport
+    ) -> None:
+        key = (app_id, token)
+        self._protocol_probe_jobs.pop(key, None)
+        delivery = self._protocol_probe_deliveries.pop(key, None)
+        if delivery is not None:
+            delivery.deleteLater()
+        meta = self.apps.get(app_id)
+        if meta is None or not meta.supports_protocol_selection or app_id not in self.views:
+            return
+        if self._protocol_probe_tokens.get(app_id) != token:
+            return
+        if protocol_support_generation(app_id) != generation:
+            return
+        self._protocol_support[app_id] = support
+        self.views[app_id].set_protocol_support(support)
+
     def _update_auth_warnings(self) -> None:
         for app_id, meta in self.apps.items():
             if meta.config_kind not in ("llm", "chat2api", "file-bridge"):
@@ -623,14 +923,87 @@ class MainWindow(QMainWindow):
                     pass
             self.views[app_id].show_auth_warnings(tuple(warnings))
 
-    def _reconcile_dependent_views(self, saved_dependents: dict[str, AppAIConfig]) -> None:
-        """Install committed dependent baselines without discarding dirty drafts."""
-        for app_id, baseline in saved_dependents.items():
-            dirty = self._is_dirty(app_id)
-            self._saved_configs[app_id] = baseline.model_copy(deep=True)
-            if not dirty:
-                self._draft_configs[app_id] = baseline.model_copy(deep=True)
-            self.views[app_id].adopt_saved_baseline(baseline, preserve_draft=dirty)
+    def _mark_dependent_reconcile_failure(self, app_id: str, error: Exception) -> None:
+        if app_id not in self.apps or app_id not in self.views:
+            return
+        self._load_failed[app_id] = True
+        self.views[app_id].set_recovery_state(
+            load_failed=True,
+            conflicts=self._baseline_conflict.get(app_id, ()),
+            message=str(error),
+            detail=getattr(error, "detail", str(error)),
+        )
+
+    def _reconcile_dependent_views(self, saved_dependents: dict[str, Path]) -> None:
+        """Install committed dependent baselines from their actual files."""
+        order = (
+            "api_base", "api_key", "endpoint", "is_split_model",
+            "model", "ocr_model", "text_model",
+        )
+        for app_id, reported_path in saved_dependents.items():
+            if app_id not in self.apps or app_id not in self.views:
+                continue
+            meta, view = self.apps[app_id], self.views[app_id]
+            registered = meta.relative_path / meta.config_file_name
+            canonical = registered.parent.resolve() / registered.name
+            previous_view_snapshot = getattr(view, "_snapshot", None)
+            try:
+                previous_view_draft = view.get_current_draft()
+            except Exception:
+                previous_view_draft = None
+            adopted = False
+            try:
+                if isinstance(reported_path, AppAIConfig):
+                    # Keep direct calls from the pre-path helper contract working;
+                    # SaveResult publication rejects this legacy value below.
+                    reported_path = canonical
+                if (
+                    meta.config_kind != "llm"
+                    or not isinstance(reported_path, Path)
+                    or reported_path != canonical
+                ):
+                    raise ConfigLoadError(
+                        registered,
+                        "Dependent result path does not match the registered configuration path.",
+                    )
+                observed = read_app_config_snapshot(meta)
+                saved_copy = observed.config.model_copy(deep=True)
+                if previous_view_snapshot is None:
+                    view.load_config(observed)
+                    conflicts = ()
+                else:
+                    conflicts = view.adopt_saved_baseline(observed, preserve_draft=True)
+                adopted = True
+                draft_copy = view.get_current_draft().model_copy(deep=True)
+            except Exception as exc:
+                if adopted and previous_view_snapshot is not None and previous_view_draft is not None:
+                    try:
+                        AppDetailView.load_config(view, previous_view_snapshot)
+                        AppDetailView._display_draft(view, previous_view_draft)
+                    except Exception:
+                        pass
+                self._mark_dependent_reconcile_failure(app_id, exc)
+                continue
+
+            self._snapshots[app_id] = observed
+            self._saved_configs[app_id] = saved_copy
+            self._draft_configs[app_id] = draft_copy
+            conflict_set = set(self._baseline_conflict.get(app_id, ())) | set(conflicts)
+            owned_conflicts = tuple(name for name in order if name in conflict_set)
+            self._baseline_conflict[app_id] = owned_conflicts
+            load_failed = self._load_failed.get(app_id, False)
+            view.set_recovery_state(
+                load_failed=load_failed,
+                conflicts=owned_conflicts,
+                message=(
+                    "Configuration changed while you were editing. Reload the configuration before saving."
+                    if owned_conflicts else ""
+                ),
+                detail=(
+                    "Conflicting fields: " + ", ".join(owned_conflicts) + "."
+                    if owned_conflicts else ""
+                ),
+            )
             self._set_dirty_indicator(app_id)
 
     @pyqtSlot(str, object)
@@ -645,7 +1018,26 @@ class MainWindow(QMainWindow):
         view.set_save_in_progress(False)
         self._update_configured_port(app_id, result.document)
         self._set_dirty_indicator(app_id)
-        self._reconcile_dependent_views(result.saved_dependents)
+        invalid_dependents = {
+            dependent_id: reported_path
+            for dependent_id, reported_path in result.saved_dependents.items()
+            if not isinstance(reported_path, Path)
+        }
+        for dependent_id in invalid_dependents:
+            if dependent_id in self.apps and dependent_id in self.views:
+                registered = self.apps[dependent_id].relative_path / self.apps[dependent_id].config_file_name
+                self._mark_dependent_reconcile_failure(
+                    dependent_id,
+                    ConfigLoadError(
+                        registered,
+                        "Dependent result path must be a canonical Path.",
+                    ),
+                )
+        self._reconcile_dependent_views({
+            dependent_id: reported_path
+            for dependent_id, reported_path in result.saved_dependents.items()
+            if isinstance(reported_path, Path)
+        })
         self._update_auth_warnings()
         if should_restart:
             self._request_saved_restart(app_id)
@@ -657,6 +1049,26 @@ class MainWindow(QMainWindow):
         self._pending_restarts.pop(app_id, None)
         self._save_jobs.pop(app_id, None)
         view = self.views[app_id]
+        if self.apps[app_id].config_kind == "llm":
+            if isinstance(error, StaleDocumentError):
+                self._load_failed[app_id] = True
+                view.set_recovery_state(
+                    load_failed=True, conflicts=self._baseline_conflict.get(app_id, ()),
+                    message="Configuration changed on disk; save refused. Reload the configuration before saving.",
+                )
+            elif isinstance(error, TransactionError):
+                if any(state == "unknown" for state in error.report.files.values()):
+                    self._load_failed[app_id] = True
+                    view.set_recovery_state(
+                        load_failed=True, conflicts=self._baseline_conflict.get(app_id, ()),
+                        message=str(error),
+                    )
+                else:
+                    view.show_config_error(str(error))
+                TransactionReportDialog(error.report, self).exec()
+            else:
+                view.show_config_error(str(error))
+            return
         view.set_save_in_progress(False)
         self._set_dirty_indicator(app_id)
         if isinstance(error, ConfigValidationError) and isinstance(
@@ -692,11 +1104,12 @@ class MainWindow(QMainWindow):
     def _request_saved_restart(self, app_id: str) -> None:
         self.views[app_id].show_config_error("Configuration saved. Restart requested.")
         self._save_restart_pending.add(app_id)
+        previous = self._submitting_restart
         self._submitting_restart = app_id
         try:
             self.supervisor_manager.restart_service(app_id)
         finally:
-            self._submitting_restart = None
+            self._submitting_restart = previous
 
     def _on_supervisor_status(self, status: SupervisorStatus) -> None:
         if status.is_running:
@@ -731,14 +1144,19 @@ class MainWindow(QMainWindow):
             app_id = self._submitting_restart
         else:
             app_id = None
-        if app_id is not None and app_id in self._save_restart_pending:
+        saved_restart = app_id is not None and app_id in self._save_restart_pending
+        if saved_restart:
             self._save_restart_pending.remove(app_id)
             self.views[app_id].show_config_error(
                 "service restart succeeded"
                 if success
                 else f"Configuration saved, but service restart failed: {msg}"
             )
-        elif not success:
+        meta = self.apps.get(app_id)
+        if meta is not None and meta.supports_protocol_selection:
+            invalidate_protocol_support(app_id)
+            self._start_protocol_probe(app_id)
+        if not saved_restart and not success:
             QMessageBox.warning(self, "Supervisor Action Failed", f"Action: {action}\n{msg}")
 
     def _toggle_theme(self) -> None:

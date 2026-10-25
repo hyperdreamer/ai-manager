@@ -1,6 +1,9 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+from PyQt6.QtCore import QByteArray, QObject, QProcess
+
 from ai_manager.config.models import ServiceRunState
 from ai_manager.services.supervisor import SupervisorManager, parse_supervisor_status
 
@@ -104,3 +107,155 @@ file-bridge  running  pid=105 log=/tmp/logs/file-bridge.log
     manager._action_process.start.assert_called_once_with(
         manager.executable, ["restart", "file-bridge"]
     )
+
+
+class _ActionSignal:
+    """Retain retired callbacks so tests can deliver an already queued signal."""
+
+    def __init__(self):
+        self.callbacks = []
+
+    def connect(self, callback):
+        self.callbacks.append(callback)
+
+    def disconnect(self, callback):
+        self.callbacks.remove(callback)
+
+    def emit(self, *args):
+        for callback in tuple(self.callbacks):
+            callback(*args)
+
+
+class ControlledActionProcess(QObject):
+    """Only the QProcess surface consumed here; start never executes a command."""
+
+    ProcessState = QProcess.ProcessState
+    ProcessError = QProcess.ProcessError
+    ExitStatus = QProcess.ExitStatus
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.finished = _ActionSignal()
+        self.errorOccurred = _ActionSignal()
+        self.readyReadStandardOutput = _ActionSignal()
+        self._state = self.ProcessState.NotRunning
+        self.starts = []
+        self.stdout = b""
+        self.stderr = b""
+        self.error = "missing launcher fixture"
+
+    def state(self):
+        return self._state
+
+    def start(self, program, args):
+        self.starts.append((program, args))
+        self._state = self.ProcessState.Running
+
+    def readAllStandardOutput(self):
+        data, self.stdout = self.stdout, b""
+        return QByteArray(data)
+
+    def readAllStandardError(self):
+        data, self.stderr = self.stderr, b""
+        return QByteArray(data)
+
+    def errorString(self):
+        return self.error
+
+    def fail_to_start(self):
+        self._state = self.ProcessState.NotRunning
+        self.errorOccurred.emit(self.ProcessError.FailedToStart)
+
+    def finish(self, code=0):
+        self._state = self.ProcessState.NotRunning
+        self.finished.emit(code, self.ExitStatus.NormalExit)
+
+
+@pytest.fixture
+def controlled_manager(qtbot, monkeypatch, tmp_path):
+    import ai_manager.services.supervisor as supervisor
+
+    monkeypatch.setattr(supervisor, "QProcess", ControlledActionProcess)
+    manager = SupervisorManager(tmp_path)
+    return manager
+
+
+def test_failed_to_start_finishes_once_without_finished(controlled_manager):
+    manager = controlled_manager
+    completed = []
+    manager.action_completed.connect(lambda *args: completed.append(args))
+    manager.restart_service("ai-grammar")
+    manager._action_process.fail_to_start()
+    assert completed == [("restart ai-grammar", False, "missing launcher fixture")]
+    assert manager._current_action == ""
+    manager._action_process.finish(1)
+    assert completed == [("restart ai-grammar", False, "missing launcher fixture")]
+
+
+def test_old_attempt_callback_cannot_finish_new_attempt(controlled_manager):
+    manager = controlled_manager
+    process = manager._action_process
+    completed = []
+    manager.action_completed.connect(lambda *args: completed.append(args))
+    manager.restart_service("ai-grammar")
+    old_finished = process.finished.callbacks[-1]
+    old_errors = tuple(process.errorOccurred.callbacks)
+    process.finish()
+    assert completed == [("restart ai-grammar", True, "Exited with code 0")]
+    assert manager._current_action == ""
+    manager.restart_service("textkit")
+    process.stderr = b"second attempt failed\xff"
+    old_finished(1, QProcess.ExitStatus.NormalExit)
+    for callback in old_errors:
+        callback(QProcess.ProcessError.FailedToStart)
+    assert len(completed) == 1
+    assert manager._current_action == "restart textkit"
+    process.finish(2)
+    assert completed == [
+        ("restart ai-grammar", True, "Exited with code 0"),
+        ("restart textkit", False, "second attempt failed\ufffd"),
+    ]
+    assert manager._current_action == ""
+    assert not process.finished.callbacks and not process.errorOccurred.callbacks
+
+
+@pytest.mark.parametrize("use_stderr", [True, False])
+def test_terminal_clears_active_state_before_reentrant_restart(controlled_manager, use_stderr):
+    manager = controlled_manager
+    process = manager._action_process
+    completed, active_at_terminal = [], []
+
+    def terminal(*args):
+        completed.append(args)
+        if len(completed) == 1:
+            active_at_terminal.append(manager._current_action)
+            manager.restart_service("textkit")
+
+    manager.action_completed.connect(terminal)
+    manager.restart_service("ai-grammar")
+    if use_stderr:
+        process.stderr, process.stdout = b" stderr fixture \n", b"ignored stdout"
+    else:
+        process.stdout = b" stdout fixture \n"
+    process.errorOccurred.emit(QProcess.ProcessError.ReadError)
+    assert completed == []
+    process.finish()
+    assert active_at_terminal == [""]
+    assert completed == [("restart ai-grammar", True, "stderr fixture" if use_stderr else "stdout fixture")]
+    assert manager._current_action == "restart textkit"
+    assert len(process.finished.callbacks) == len(process.errorOccurred.callbacks) == 1
+    process.fail_to_start()
+    assert completed[-1] == ("restart textkit", False, "missing launcher fixture")
+
+
+def test_busy_restart_is_an_immediate_unqualified_terminal(controlled_manager):
+    manager = controlled_manager
+    completed = []
+    manager.action_completed.connect(lambda *args: completed.append(args))
+    manager.restart_service("ai-grammar")
+    manager.restart_service("textkit")
+    assert completed == [("restart", False, "Another supervisor command is in progress.")]
+    assert manager._current_action == "restart ai-grammar"
+    assert len(manager._action_process.starts) == 1
+    manager._action_process.finish()
+    assert completed[-1][0] == "restart ai-grammar"

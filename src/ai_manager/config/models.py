@@ -1,7 +1,10 @@
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from ai_manager.config.protocols import EndpointValue
 
 
 class ThemeMode(str, Enum):
@@ -26,6 +29,26 @@ class AppAIConfig(BaseModel):
     is_split_model: bool = False
     ocr_model: Optional[str] = None
     text_model: Optional[str] = None
+    endpoint: Optional[EndpointValue] = None
+    endpoint_raw: Optional[str] = None
+
+    @field_validator("api_base", "api_key", mode="before")
+    @classmethod
+    def strip_strings(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("model", "ocr_model", "text_model", mode="before")
+    @classmethod
+    def canonical_model(cls, value: object) -> object:
+        return (value.strip() or None) if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def active_models_only(self):
+        if self.is_split_model:
+            self.model = None
+        else:
+            self.ocr_model = self.text_model = None
+        return self
 
     def get_display_model(self) -> str:
         if self.is_split_model:
@@ -45,6 +68,7 @@ class AppMetadata(BaseModel):
     example_config_file_name: str = "config.example.yaml"
     default_port: int
     supports_split_models: bool = False
+    supports_protocol_selection: bool = False
     description: str = ""
     config_kind: ConfigKind = "llm"
 
@@ -68,6 +92,7 @@ class ProviderPreset(BaseModel):
     default_key_env_var: Optional[str] = None
     docs_url: Optional[str] = None
     description: str = ""
+    endpoint: Optional[EndpointValue] = None
 
 
 class ServiceStatus(BaseModel):
@@ -92,6 +117,7 @@ class ModelFetchRequest(BaseModel):
     api_base: str
     api_key: str
     app_id: str = Field(strict=True, min_length=1)
+    endpoint: Optional[str] = None
 
 
 class ModelFetchResponse(BaseModel):
@@ -101,6 +127,22 @@ class ModelFetchResponse(BaseModel):
     models: List[str] = Field(default_factory=list)
     error_message: Optional[str] = None
     endpoint_used: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ConfigSnapshot:
+    config: AppAIConfig
+    sha256: bytes
+    api_base_present: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.config, AppAIConfig):
+            raise ValueError("Snapshot config must be an AppAIConfig.")
+        if type(self.sha256) is not bytes or len(self.sha256) != 32:
+            raise ValueError("Snapshot digest must be a 32-byte SHA-256 value.")
+        if type(self.api_base_present) is not bool:
+            raise ValueError("Snapshot base presence must be a boolean.")
+        object.__setattr__(self, "config", self.config.model_copy(deep=True))
 
 
 class UserSettings(BaseModel):

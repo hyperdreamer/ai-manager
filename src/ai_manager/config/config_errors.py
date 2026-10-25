@@ -96,6 +96,23 @@ class TransactionError(ConfigError):
         self.report = report
 
 
+class CommittedWriteError(ConfigError):
+    def __init__(
+        self,
+        path: Path,
+        installed_sha256: bytes,
+        report: TransactionReport,
+        cause: BaseException,
+    ) -> None:
+        super().__init__(
+            "Configuration saved, but the file must be reloaded before another save."
+        )
+        self.path = path
+        self.installed_sha256 = installed_sha256
+        self.report = report
+        self.cause = cause
+
+
 def require_llm(meta) -> None:
     if meta.config_kind not in ("llm", "chat2api", "file-bridge"):
         raise UnknownConfigKindError(meta.config_kind)

@@ -103,19 +103,21 @@ class Transaction:
                     # depends on deletion.
                     pass
                 self._temps.discard(path)
-        except BaseException as exc:
-            cleanup_error = exc
+        except BaseException as temp_error:
+            cleanup_error = temp_error
         finally:
             try:
                 self._release()
-            except BaseException as exc:
+            except BaseException as release_error:
                 if cleanup_error is None:
-                    cleanup_error = exc
+                    cleanup_error = release_error
             finally:
                 # Context state is finalized before any cleanup error escapes.
                 self._entered = False
                 self._state = "closed"
         if cleanup_error is not None:
+            if exc is not None:
+                raise exc.with_traceback(tb) from cleanup_error
             raise cleanup_error
         return False
 

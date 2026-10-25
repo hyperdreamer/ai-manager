@@ -3,7 +3,7 @@ from pydantic import ValidationError
 
 from ai_manager.config.app_registry import get_managed_apps
 from ai_manager.config.config_errors import ConfigError, UnknownConfigKindError
-from ai_manager.config.models import AppAIConfig, AppMetadata
+from ai_manager.config.models import AppAIConfig, AppMetadata, UserSettings
 from ai_manager.config.presets import DEFAULT_PRESETS
 from ai_manager.config.yaml_manager import (
     ensure_config_exists,
@@ -57,7 +57,7 @@ def test_legacy_dispatch_does_not_materialize_structured_examples(five_app_works
         for call in (
             lambda: ensure_config_exists(meta),
             lambda: read_app_config(meta),
-            lambda: write_app_config(meta, AppAIConfig()),
+            lambda: write_app_config(meta, AppAIConfig(), baseline=AppAIConfig()),
         ):
             with pytest.raises(ConfigError):
                 call()
@@ -77,3 +77,30 @@ def test_chat2api_preset_uses_the_backend_variable_name():
     preset = next(p for p in DEFAULT_PRESETS if p.id == "chat2api_local")
     assert preset.default_key_env_var == "CHAT2API_TOKEN"
     assert preset.api_base == "http://127.0.0.1:8000"
+
+
+def test_protocol_flags_are_structural_and_exact(tmp_path):
+    apps = get_managed_apps(tmp_path)
+    assert {
+        k for k, v in apps.items() if v.supports_protocol_selection
+    } == {"ai-grammar", "textkit"}
+    assert [k for k, v in apps.items() if v.supports_split_models] == ["textkit"]
+
+
+def test_legacy_custom_presets_default_endpoint_to_none():
+    settings = UserSettings(
+        custom_presets=[{"id": "c", "name": "C", "api_base": "https://x"}]
+    )
+    assert settings.custom_presets[0].endpoint is None
+
+
+def test_endpoint_metadata_factory_is_isolated_and_selectable(tmp_path):
+    from tests.endpoint_helpers import meta_for
+
+    textkit = meta_for(tmp_path, "textkit")
+    assert textkit.relative_path == tmp_path / "textkit" / "backend"
+    assert textkit.relative_path.is_dir()
+    assert textkit.supports_protocol_selection is True
+    assert textkit.supports_split_models is True
+    assert textkit.default_port == 8000
+    assert meta_for(tmp_path, selectable=False).supports_protocol_selection is False

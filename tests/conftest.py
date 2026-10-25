@@ -184,3 +184,39 @@ def isolate_manager(monkeypatch):
             raising=False,
         )
         monkeypatch.setattr(mw.MainWindow, "_start_launcher_probes", passed)
+    from ai_manager.services.protocol_capability import ProtocolSupport, ProtocolSupportStatus
+
+    def unknown_protocols(window):
+        for app_id, meta in window.apps.items():
+            if meta.supports_protocol_selection:
+                support = ProtocolSupport(ProtocolSupportStatus.UNVERIFIABLE)
+                window._protocol_support[app_id] = support
+                window.views[app_id].set_protocol_support(support)
+
+    monkeypatch.setattr(
+        mw.MainWindow,
+        "_production_start_protocol_probes",
+        mw.MainWindow._start_protocol_probes,
+        raising=False,
+    )
+    monkeypatch.setattr(mw.MainWindow, "_start_protocol_probes", unknown_protocols)
+
+
+@pytest.fixture
+def endpoint_window(qtbot, five_app_workspace, monkeypatch, request):
+    """Real five-app coordinator with controlled jobs, restart and teardown."""
+    from unittest.mock import MagicMock
+    from PyQt6.QtWidgets import QMessageBox
+    from ai_manager.ui.main_window import MainWindow
+
+    monkeypatch.setattr(
+        QMessageBox, "question", lambda *args, **kwargs: QMessageBox.StandardButton.Discard
+    )
+    prepare = getattr(request, "param", None)
+    if prepare is not None:
+        prepare(five_app_workspace, monkeypatch)
+    window = MainWindow(workspace_root=five_app_workspace)
+    qtbot.addWidget(window)
+    window.thread_pool = MagicMock()
+    monkeypatch.setattr(window.supervisor_manager, "restart_service", MagicMock())
+    return window

@@ -99,7 +99,7 @@ def find_affected_dependents(apps: Mapping[str, AppMetadata], before: Structured
                 raise ValueError("Expected a mapping with a string ai.api_base.")
             old_base = tree["ai"]["api_base"]
             if urls_match(old_base, old_url):
-                saved = _config_from_document(tree)
+                saved = _config_from_document(tree, meta)
                 warning = auth_mismatch_warning(saved, auth)
                 matches.append(DependentMatch(meta, canonical, tree, raw, hashlib.sha256(raw).digest(), saved, old_base, new_url, warning.format(app_id=app_id) if warning else None))
         except Exception as exc:

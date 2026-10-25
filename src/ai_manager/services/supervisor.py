@@ -119,8 +119,12 @@ class SupervisorManager(QObject):
         self._status_process.errorOccurred.connect(self._on_status_error)
 
         self._action_process = QProcess(self)
-        self._action_process.finished.connect(self._on_action_finished)
         self._current_action: str = ""
+        self._action_attempt_counter = 0
+        self._active_action_attempt: Optional[int] = None
+        self._completed_action_attempt = 0
+        self._action_finished_callback = None
+        self._action_error_callback = None
 
     def refresh_status(self) -> None:
         """Runs `ai-backends status` asynchronously."""
@@ -206,11 +210,24 @@ class SupervisorManager(QObject):
 
     def restart_service(self, service_name: str) -> None:
         """Runs `ai-backends restart <service_name>` asynchronously."""
-        if self._action_process.state() != QProcess.ProcessState.NotRunning:
+        if (
+            self._active_action_attempt is not None
+            or self._action_process.state() != QProcess.ProcessState.NotRunning
+        ):
             self.action_completed.emit("restart", False, "Another supervisor command is in progress.")
             return
 
-        self._current_action = f"restart {service_name}"
+        self._action_attempt_counter += 1
+        attempt = self._action_attempt_counter
+        action = f"restart {service_name}"
+        self._active_action_attempt = attempt
+        self._current_action = action
+        self._action_finished_callback = lambda code, status: self._on_action_finished(
+            attempt, action, code, status
+        )
+        self._action_error_callback = lambda error: self._on_action_error(attempt, action, error)
+        self._action_process.finished.connect(self._action_finished_callback)
+        self._action_process.errorOccurred.connect(self._action_error_callback)
         self._action_process.start(self.executable, ["restart", service_name])
 
     def _spawn_supervisor(self, command: str, *, silent: bool) -> bool:
@@ -242,14 +259,42 @@ class SupervisorManager(QObject):
         if self._spawn_supervisor("stop", silent=False):
             self.refresh_status()
 
-    def _on_action_finished(self, exit_code: int, exit_status) -> None:
+    def _on_action_finished(
+        self, attempt: int, action: str, exit_code: int, exit_status
+    ) -> None:
+        # A retired callback must not consume a newer attempt's output either.
+        if attempt != self._active_action_attempt:
+            return
         success = exit_code == 0
         stderr_bytes = self._action_process.readAllStandardError().data()
         msg = stderr_bytes.decode("utf-8", errors="replace").strip()
         if not msg:
             stdout_bytes = self._action_process.readAllStandardOutput().data()
             msg = stdout_bytes.decode("utf-8", errors="replace").strip()
-        self.action_completed.emit(self._current_action, success, msg or f"Exited with code {exit_code}")
+        self._complete_action(attempt, action, success, msg or f"Exited with code {exit_code}")
+
+    def _on_action_error(self, attempt: int, action: str, error) -> None:
+        if error == QProcess.ProcessError.FailedToStart:
+            self._complete_action(attempt, action, False, self._action_process.errorString())
+
+    def _complete_action(self, attempt: int, action: str, success: bool, message: str) -> None:
+        """Retire one attempt before emitting its single terminal completion."""
+        if attempt != self._active_action_attempt or attempt <= self._completed_action_attempt:
+            return
+        self._completed_action_attempt = attempt
+        self._active_action_attempt = None
+        self._current_action = ""
+        for signal, callback in (
+            (self._action_process.finished, self._action_finished_callback),
+            (self._action_process.errorOccurred, self._action_error_callback),
+        ):
+            if callback is not None:
+                try:
+                    signal.disconnect(callback)
+                except (TypeError, RuntimeError):
+                    pass  # Already disconnected or its Qt sender was retired.
+        self._action_finished_callback = self._action_error_callback = None
+        self.action_completed.emit(action, success, message)
         self.refresh_status()
 
 
