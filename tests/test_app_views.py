@@ -2,8 +2,17 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
-from PyQt6.QtCore import QSignalBlocker, Qt
-from PyQt6.QtWidgets import QFrame, QLabel, QScrollArea, QTabWidget
+from PyQt6.QtCore import QRect, QSignalBlocker, Qt
+from PyQt6.QtGui import QFontMetrics
+from PyQt6.QtWidgets import (
+    QFrame,
+    QLabel,
+    QScrollArea,
+    QStyle,
+    QStyleOptionComboBox,
+    QTabWidget,
+    QToolButton,
+)
 
 from ai_manager.config.app_registry import get_managed_apps
 from ai_manager.config.models import AppAIConfig, ModelFetchResponse, ServiceRunState, ServiceStatus
@@ -12,7 +21,7 @@ from ai_manager.ui import app_detail_view as detail_module
 from ai_manager.config.protocols import ENDPOINT_VALUES
 from ai_manager.services.protocol_capability import ProtocolSupport, ProtocolSupportStatus
 from tests.endpoint_helpers import meta_for, snapshot
-from ai_manager.ui.app_detail_view import AppDetailView
+from ai_manager.ui.app_detail_view import AppDetailView, DROPDOWN_MAX_WIDTH
 from ai_manager.ui.app_sidebar import AppSidebar
 
 
@@ -1096,3 +1105,199 @@ def test_fetch_model_delivery_keeps_current_pair_blank_model_and_exact_copy(qtbo
     assert view._fetch_status_label.text() == "⚠️ <failed & literal>"
     assert view._fetch_status_label.textFormat() == Qt.TextFormat.PlainText
     assert view.get_current_draft() == pending and events == []
+
+
+def test_dropdown_maximum_width_applied_to_all_four_combos(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+
+    assert type(DROPDOWN_MAX_WIDTH) is int
+    assert DROPDOWN_MAX_WIDTH == 480
+    assert (
+        view._protocol_combo.maximumWidth(),
+        view._model_combo.maximumWidth(),
+        view._ocr_combo.maximumWidth(),
+        view._text_combo.maximumWidth(),
+    ) == (480, 480, 480, 480)
+
+
+def test_api_text_fields_remain_uncapped(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+
+    assert view._base_url_edit.maximumWidth() > DROPDOWN_MAX_WIDTH
+    assert view._key_edit.maximumWidth() > DROPDOWN_MAX_WIDTH
+
+
+def test_dropdown_caps_are_effective_in_live_layout_at_1400px(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+    view.resize(1400, 900)
+    view.show()
+    qtbot.waitUntil(lambda: view._protocol_combo.width() > 0 and view._model_combo.width() > 0)
+
+    assert view.width() == 1400
+    assert 0 < view._protocol_combo.width() <= DROPDOWN_MAX_WIDTH + 1
+    assert 0 < view._model_combo.width() <= DROPDOWN_MAX_WIDTH + 1
+
+    view._split_chk.setChecked(True)
+    qtbot.waitUntil(lambda: view._ocr_combo.width() > 0 and view._text_combo.width() > 0)
+    assert 0 < view._ocr_combo.width() <= DROPDOWN_MAX_WIDTH + 1
+    assert 0 < view._text_combo.width() <= DROPDOWN_MAX_WIDTH + 1
+
+
+def test_base_url_remains_full_width_in_1400px_live_layout(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+    view.resize(1400, 900)
+    view.show()
+    qtbot.waitUntil(lambda: view._base_url_edit.width() > DROPDOWN_MAX_WIDTH + 100)
+
+    assert view.width() == 1400
+    assert view._base_url_edit.width() > DROPDOWN_MAX_WIDTH + 100
+
+
+def test_dropdown_maximum_is_independent_of_window_width(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+    view.show()
+    combos = (
+        view._protocol_combo, view._model_combo, view._ocr_combo, view._text_combo,
+    )
+
+    for width in (1400, 600):
+        view.resize(width, 900)
+        qtbot.waitUntil(lambda: view.width() == width)
+        assert tuple(combo.maximumWidth() for combo in combos) == (DROPDOWN_MAX_WIDTH,) * 4
+
+
+def test_dropdowns_shrink_below_cap_when_column_is_narrower(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+    view.resize(420, 900)
+    view.show()
+    qtbot.waitUntil(
+        lambda: view._protocol_combo.width() > 0 and view._model_combo.width() > 0
+    )
+
+    assert tuple(
+        combo.maximumWidth()
+        for combo in (
+            view._protocol_combo,
+            view._model_combo,
+            view._ocr_combo,
+            view._text_combo,
+        )
+    ) == (480, 480, 480, 480)
+    assert view._protocol_combo.width() < 480
+    assert view._model_combo.width() < 480
+
+    view._split_chk.setChecked(True)
+    qtbot.waitUntil(lambda: view._ocr_combo.width() > 0 and view._text_combo.width() > 0)
+    assert view._ocr_combo.width() < 480
+    assert view._text_combo.width() < 480
+
+
+def test_widest_protocol_label_fits_inside_dropdown_cap(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+    combo = view._protocol_combo
+    metrics = QFontMetrics(combo.font())
+    widest = "OpenAI Chat Completions — /v1/chat/completions"
+
+    assert widest == max(view._protocol_labels, key=metrics.horizontalAdvance)
+    option = QStyleOptionComboBox()
+    option.initFrom(combo)
+    option.rect = QRect(0, 0, DROPDOWN_MAX_WIDTH, combo.sizeHint().height())
+    option.currentText = widest
+    option.editable = combo.isEditable()
+    option.frame = combo.hasFrame()
+    text_rect = combo.style().subControlRect(
+        QStyle.ComplexControl.CC_ComboBox,
+        option,
+        QStyle.SubControl.SC_ComboBoxEditField,
+        combo,
+    )
+
+    assert metrics.horizontalAdvance(widest) <= text_rect.width()
+
+
+def test_long_model_value_remains_editable_and_scrolls_to_cursor(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+    view.resize(900, 700)
+    view.show()
+    long_value = "m365-copilot-gpt-5.5-think-deeper-reasoning-" * 4
+    view._model_combo.setEditText(long_value)
+    line_edit = view._model_combo.lineEdit()
+    assert line_edit is not None
+    line_edit.setFocus()
+    line_edit.setCursorPosition(len(long_value))
+    qtbot.waitUntil(line_edit.hasFocus)
+    caret = line_edit.inputMethodQuery(Qt.InputMethodQuery.ImCursorRectangle)
+
+    assert QFontMetrics(line_edit.font()).horizontalAdvance(long_value) > line_edit.contentsRect().width()
+    assert view._model_combo.currentText() == long_value
+    assert line_edit.cursorPosition() == len(long_value)
+    assert line_edit.contentsRect().contains(caret.center())
+
+
+def test_unified_and_split_model_combo_widths_match(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+    view.resize(1400, 900)
+    view.show()
+    view._split_chk.setChecked(False)
+    qtbot.waitUntil(lambda: view._model_combo.width() > 0)
+    unified_width = view._model_combo.width()
+
+    view._split_chk.setChecked(True)
+    qtbot.waitUntil(lambda: view._ocr_combo.width() > 0 and view._text_combo.width() > 0)
+    assert unified_width == view._ocr_combo.width() == view._text_combo.width()
+    assert unified_width == DROPDOWN_MAX_WIDTH
+
+
+def test_model_combo_still_lists_all_available_models(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+    models = ["gemini-flash-high", "deepseek-flash", "m365-copilot"]
+
+    view.set_available_models(models)
+
+    assert [view._model_combo.itemText(i) for i in range(view._model_combo.count())] == models
+
+
+def test_model_quick_pick_click_fills_unified_combo(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+    model = "deepseek-flash"
+    view.set_available_models([model])
+    chip = view.findChild(QToolButton, "modelChip")
+    assert chip is not None
+
+    qtbot.mouseClick(chip, Qt.MouseButton.LeftButton)
+
+    assert view._model_combo.currentText() == model
+
+
+def test_protocol_selection_updates_current_draft_endpoint(qtbot, tmp_path):
+    view = AppDetailView(meta_for(tmp_path, "textkit"))
+    qtbot.addWidget(view)
+    view.load_config(snapshot())
+    index = view._protocol_combo.findData("/v1/messages")
+    assert index >= 0
+
+    view._protocol_combo.setCurrentIndex(index)
+
+    assert view.get_current_draft().endpoint == "/v1/messages"
