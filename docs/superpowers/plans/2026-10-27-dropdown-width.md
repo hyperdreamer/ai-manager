@@ -95,12 +95,14 @@ def test_dropdown_maximum_width_applied_to_all_four_combos(qtbot, tmp_path):
     qtbot.addWidget(view)
     view.load_config(snapshot())
 
+    assert type(DROPDOWN_MAX_WIDTH) is int
+    assert DROPDOWN_MAX_WIDTH == 480
     assert (
         view._protocol_combo.maximumWidth(),
         view._model_combo.maximumWidth(),
         view._ocr_combo.maximumWidth(),
         view._text_combo.maximumWidth(),
-    ) == (DROPDOWN_MAX_WIDTH,) * 4
+    ) == (480, 480, 480, 480)
 
 
 def test_api_text_fields_remain_uncapped(qtbot, tmp_path):
@@ -164,17 +166,25 @@ def test_dropdowns_shrink_below_cap_when_column_is_narrower(qtbot, tmp_path):
     view.resize(420, 900)
     view.show()
     qtbot.waitUntil(
-        lambda: view._provider_group.contentsRect().width() < DROPDOWN_MAX_WIDTH
-        and view._model_group.contentsRect().width() < DROPDOWN_MAX_WIDTH
+        lambda: view._protocol_combo.width() > 0 and view._model_combo.width() > 0
     )
 
-    assert view._protocol_combo.width() < DROPDOWN_MAX_WIDTH
-    assert view._model_combo.width() < DROPDOWN_MAX_WIDTH
+    assert tuple(
+        combo.maximumWidth()
+        for combo in (
+            view._protocol_combo,
+            view._model_combo,
+            view._ocr_combo,
+            view._text_combo,
+        )
+    ) == (480, 480, 480, 480)
+    assert view._protocol_combo.width() < 480
+    assert view._model_combo.width() < 480
 
     view._split_chk.setChecked(True)
     qtbot.waitUntil(lambda: view._ocr_combo.width() > 0 and view._text_combo.width() > 0)
-    assert view._ocr_combo.width() < DROPDOWN_MAX_WIDTH
-    assert view._text_combo.width() < DROPDOWN_MAX_WIDTH
+    assert view._ocr_combo.width() < 480
+    assert view._text_combo.width() < 480
 
 
 def test_widest_protocol_label_fits_inside_dropdown_cap(qtbot, tmp_path):
