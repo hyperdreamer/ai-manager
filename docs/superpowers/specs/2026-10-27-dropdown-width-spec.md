@@ -32,7 +32,7 @@ These are the complete set of call sites. The protocol combo remains conditional
 
 Each statement below is a separately testable contract:
 
-1. `DROPDOWN_MAX_WIDTH` is the integer `480`, in Qt logical pixels, and is not calculated from window or column dimensions.
+1. `DROPDOWN_MAX_WIDTH` is the integer `480`, in Qt logical pixels, and is not calculated from window or column dimensions. Pinned by a literal comparison in §4.1, never by comparing the constant to itself.
 2. `_protocol_combo`, `_model_combo`, `_ocr_combo`, and `_text_combo` each report `maximumWidth() == DROPDOWN_MAX_WIDTH`.
 3. In a wide live layout, no in-use combo exceeds `DROPDOWN_MAX_WIDTH + 1` pixels. The `+ 1` allowance is for Qt geometry rounding only.
 4. Resizing the view does not change the four combos' configured `maximumWidth()`; the property remains 480 at both wide and narrow window widths.
@@ -63,18 +63,24 @@ QT_QPA_PLATFORM=offscreen pytest -q tests/test_app_views.py
 
 ### 4.1 Cap applies to all four combos
 
+The literal width is asserted independently of the production constant. Comparing
+`maximumWidth()` to `DROPDOWN_MAX_WIDTH` alone is not a test of the contract: it is
+the constant compared to itself, so any value, including 500, passes.
+
 ```python
 def test_dropdown_maximum_width_applied_to_all_four_combos(qtbot, tmp_path):
     view = AppDetailView(meta_for(tmp_path, "textkit"))
     qtbot.addWidget(view)
     view.load_config(snapshot())
 
+    assert type(DROPDOWN_MAX_WIDTH) is int
+    assert DROPDOWN_MAX_WIDTH == 480
     assert (
         view._protocol_combo.maximumWidth(),
         view._model_combo.maximumWidth(),
         view._ocr_combo.maximumWidth(),
         view._text_combo.maximumWidth(),
-    ) == (DROPDOWN_MAX_WIDTH,) * 4
+    ) == (480, 480, 480, 480)
 ```
 
 ### 4.2 Text fields remain uncapped
@@ -151,6 +157,12 @@ def test_dropdown_maximum_is_independent_of_window_width(qtbot, tmp_path):
 
 ### 4.6 Combos shrink below the cap in a narrower column
 
+The readiness wait only waits for positive geometry. Waiting for the column to become
+narrower than the cap made the fixed-width mutant die as a `TimeoutError` instead of
+reaching the assertion that names the defect. The test also states the cap explicitly,
+because the default `Preferred` policy already shrinks these combos when the column is
+narrow: without the cap assertions this test passes on an uncapped implementation.
+
 ```python
 def test_dropdowns_shrink_below_cap_when_column_is_narrower(qtbot, tmp_path):
     view = AppDetailView(meta_for(tmp_path, "textkit"))
@@ -159,17 +171,25 @@ def test_dropdowns_shrink_below_cap_when_column_is_narrower(qtbot, tmp_path):
     view.resize(420, 900)
     view.show()
     qtbot.waitUntil(
-        lambda: view._provider_group.contentsRect().width() < DROPDOWN_MAX_WIDTH
-        and view._model_group.contentsRect().width() < DROPDOWN_MAX_WIDTH
+        lambda: view._protocol_combo.width() > 0 and view._model_combo.width() > 0
     )
 
-    assert view._protocol_combo.width() < DROPDOWN_MAX_WIDTH
-    assert view._model_combo.width() < DROPDOWN_MAX_WIDTH
+    assert tuple(
+        combo.maximumWidth()
+        for combo in (
+            view._protocol_combo,
+            view._model_combo,
+            view._ocr_combo,
+            view._text_combo,
+        )
+    ) == (480, 480, 480, 480)
+    assert view._protocol_combo.width() < 480
+    assert view._model_combo.width() < 480
 
     view._split_chk.setChecked(True)
     qtbot.waitUntil(lambda: view._ocr_combo.width() > 0 and view._text_combo.width() > 0)
-    assert view._ocr_combo.width() < DROPDOWN_MAX_WIDTH
-    assert view._text_combo.width() < DROPDOWN_MAX_WIDTH
+    assert view._ocr_combo.width() < 480
+    assert view._text_combo.width() < 480
 ```
 
 ### 4.7 Widest protocol label fits using style geometry and `QFontMetrics`
@@ -306,7 +326,9 @@ Run each probe in an isolated copy of the implementation/test change. Each probe
 | Remove only the `_text_combo.setMaximumWidth(DROPDOWN_MAX_WIDTH)` line. | `test_dropdown_maximum_width_applied_to_all_four_combos` | The text combo reports its default maximum width instead of 480. |
 | Change `DROPDOWN_MAX_WIDTH = 480` to `DROPDOWN_MAX_WIDTH = 300`. | `test_widest_protocol_label_fits_inside_dropdown_cap` | The widest label's `QFontMetrics.horizontalAdvance()` exceeds the style's edit-field width. |
 | Add `self._base_url_edit.setMaximumWidth(DROPDOWN_MAX_WIDTH)` as a single extra call. | `test_api_text_fields_remain_uncapped` | The base URL maximum becomes 480, not greater than 480. |
-| Replace the model combo's `setMaximumWidth(...)` call with `setFixedWidth(...)`. | `test_dropdowns_shrink_below_cap_when_column_is_narrower` | The model combo remains fixed at 480 when its column is narrower. |
+| Change `DROPDOWN_MAX_WIDTH = 480` to `DROPDOWN_MAX_WIDTH = 500`. | `test_dropdown_maximum_width_applied_to_all_four_combos` | `assert DROPDOWN_MAX_WIDTH == 480` fails, and the `(480, 480, 480, 480)` tuple comparison fails as well. |
+| Remove all four `setMaximumWidth(DROPDOWN_MAX_WIDTH)` calls. | `test_dropdown_maximum_width_applied_to_all_four_combos` and `test_dropdowns_shrink_below_cap_when_column_is_narrower` | Each combo reports `16777215`, so both the tuple assertion in 4.1 and the cap assertion in 4.6 fail; 4.6 additionally fails because the default policy still shrinks the combos. |
+| Replace the model combo's `setMaximumWidth(...)` call with `setFixedWidth(...)`. | `test_dropdowns_shrink_below_cap_when_column_is_narrower` | Reaches `assert view._protocol_combo.width() < 480` and fails there with `assert 480 < 480`: a fixed 480 px model combo raises the view minimum to 441 px, so the clamped column keeps every combo in it at exactly 480. The readiness wait no longer depends on the cap, so the failure is an assertion, not a `TimeoutError`. |
 | Insert `self._model_combo.setEditable(False)` immediately after the unified model combo is constructed. | `test_long_model_value_remains_editable_and_scrolls_to_cursor` | `lineEdit()` returns `None`, so `assert line_edit is not None` fails. Do not mutate `ModelComboBox.__init__` instead: its completer dereference raises `AttributeError` during construction, which errors the test without exercising the scroll contract. |
 | Remove the `_model_combo.set_models(...)` population call from `_display_draft`. | `test_model_combo_still_lists_all_available_models` | The fetched model strings are absent from the combo items. |
 | Change `_apply_model_choice` so it no longer sets the unified combo's edit text. | `test_model_quick_pick_click_fills_unified_combo` | A real quick-pick click leaves the model combo unchanged. |
