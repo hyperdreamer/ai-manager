@@ -42,6 +42,8 @@ from ai_manager.ui.widgets.log_view import LogViewWidget
 from ai_manager.ui.widgets.model_combo import ModelComboBox
 from ai_manager.ui.widgets.status_badge import StatusBadge
 
+DROPDOWN_MAX_WIDTH = 480
+
 
 class AppDetailView(QWidget):
     """Detailed view for configuring a target application."""
@@ -158,6 +160,7 @@ class AppDetailView(QWidget):
         if self.app_meta.supports_protocol_selection:
             p_layout.addWidget(QLabel("Upstream protocol", self))
             self._protocol_combo = QComboBox(self)
+            self._protocol_combo.setMaximumWidth(DROPDOWN_MAX_WIDTH)
             self._protocol_combo.addItem(self._protocol_labels[0], None)
             for label, protocol in zip(self._protocol_labels[1:], PROTOCOLS):
                 self._protocol_combo.addItem(label, protocol.value)
@@ -225,6 +228,7 @@ class AppDetailView(QWidget):
         u_layout.setContentsMargins(0, 0, 0, 0)
         u_layout.addWidget(QLabel("Model:", self))
         self._model_combo = ModelComboBox(self)
+        self._model_combo.setMaximumWidth(DROPDOWN_MAX_WIDTH)
         self._model_combo.currentTextChanged.connect(self._on_field_changed)
         u_layout.addWidget(self._model_combo)
 
@@ -234,11 +238,13 @@ class AppDetailView(QWidget):
         s_layout.setContentsMargins(0, 0, 0, 0)
         s_layout.addWidget(QLabel("OCR Model:", self))
         self._ocr_combo = ModelComboBox(self)
+        self._ocr_combo.setMaximumWidth(DROPDOWN_MAX_WIDTH)
         self._ocr_combo.currentTextChanged.connect(self._on_field_changed)
         s_layout.addWidget(self._ocr_combo)
 
         s_layout.addWidget(QLabel("Text Model:", self))
         self._text_combo = ModelComboBox(self)
+        self._text_combo.setMaximumWidth(DROPDOWN_MAX_WIDTH)
         self._text_combo.currentTextChanged.connect(self._on_field_changed)
         s_layout.addWidget(self._text_combo)
         self._split_box.setVisible(False)
