@@ -1,11 +1,11 @@
-# PM execution manifest for the dropdown-width plan (epoch 1).
+# PM execution manifest for the dropdown-width plan (epoch 2, amended spec).
 # Derived by the PM from the validated source plan; never hand-edited.
 source_plan:
   path: docs/superpowers/plans/2026-10-27-dropdown-width.md
-  sha256: 2aba0a3189cb144026e14dde27196f6ede9aab9cc0fa98e823bd98bf93cfabf6
-  commit_oid: 330a715d9fb4caaf4c6aa84b1b539b193776dfeb
+  sha256: 93696b5a3d0441cecc541fc4c895ff7c045c6dae4081ed07e2b305759c403751
+  commit_oid: 6e540f6f22414583889c569b593234d6027a947e
 topic_slug: dropdown-width
-epoch: 1
+epoch: 2
 repositories:
   ai-manager: /data/home/guest/Development/ai/ai-manager
 lanes:
