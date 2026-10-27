@@ -2,8 +2,8 @@
 # Derived by the PM from the validated source plan; never hand-edited.
 source_plan:
   path: docs/superpowers/plans/2026-10-27-dropdown-width.md
-  sha256: 93696b5a3d0441cecc541fc4c895ff7c045c6dae4081ed07e2b305759c403751
-  commit_oid: 6e540f6f22414583889c569b593234d6027a947e
+  sha256: c87936c58870889c08d95779e410f395c2fa2b764ebdece5468d6bd38d64f6fd
+  commit_oid: 64265d588e7ba2a961e1b8cec279e91953c76793
 topic_slug: dropdown-width
 epoch: 2
 repositories:
