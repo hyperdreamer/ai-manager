@@ -1,0 +1,12 @@
+// Derived deterministically from the execution manifest + parsed plan. Inspection only.
+digraph dropdown_width {
+    rankdir=TB;
+    node [shape=box, style=rounded, fontname="Helvetica"];
+    "T-001" [label="Task 1: Append the approved dropdown regression tests and commit RED\neconomy"];
+    "T-002" [label="Task 2: Add the shared cap and four construction-time calls, then commit GREEN\nstandard"];
+    "T-001" -> "T-002" [label="sequence"];
+    subgraph cluster_ui {
+        label = "lane ui";
+        "T-001"; "T-002";
+    }
+}

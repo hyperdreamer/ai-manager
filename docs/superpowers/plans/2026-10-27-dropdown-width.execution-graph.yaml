@@ -1,0 +1,54 @@
+# PM execution manifest for the dropdown-width plan (epoch 1).
+# Derived by the PM from the validated source plan; never hand-edited.
+source_plan:
+  path: docs/superpowers/plans/2026-10-27-dropdown-width.md
+  sha256: 2aba0a3189cb144026e14dde27196f6ede9aab9cc0fa98e823bd98bf93cfabf6
+  commit_oid: 330a715d9fb4caaf4c6aa84b1b539b193776dfeb
+topic_slug: dropdown-width
+epoch: 1
+repositories:
+  ai-manager: /data/home/guest/Development/ai/ai-manager
+lanes:
+  - id: ui
+    owns: ["src/ai_manager/ui/app_detail_view.py", "tests/test_app_views.py"]
+    task_ids: [T-001, T-002]
+tasks:
+  - id: T-001
+    plan_task: 1
+    title: "Append the approved dropdown regression tests and commit RED"
+    tier: economy
+    repository: ai-manager
+    lane: ui
+    sequence: 1
+    depends_on: []
+    owns: ["tests/test_app_views.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src", AI_WORKSPACE_ROOT: "/data/home/guest/Development/ai"}
+        timeout_seconds: 1800
+  - id: T-002
+    plan_task: 2
+    title: "Add the shared cap and four construction-time calls, then commit GREEN"
+    tier: standard
+    repository: ai-manager
+    lane: ui
+    sequence: 2
+    depends_on: ["T-001"]
+    owns: ["src/ai_manager/ui/app_detail_view.py"]
+    resources: []
+    produces: []
+    consumes: []
+    validation:
+      - argv: ["/home/guest/anaconda3/envs/daily/bin/python3", "-m", "pytest", "tests/", "-q"]
+        cwd: "."
+        env: {QT_QPA_PLATFORM: "offscreen", PYTHONPATH: "src", AI_WORKSPACE_ROOT: "/data/home/guest/Development/ai"}
+        timeout_seconds: 1800
+interfaces:
+  produces: []
+  consumes: []
+produces: []
+consumes: []
