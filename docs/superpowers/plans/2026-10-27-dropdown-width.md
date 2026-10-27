@@ -482,7 +482,7 @@ probes = [
         "        self._model_combo.setMaximumWidth(DROPDOWN_MAX_WIDTH)\n",
         "        self._model_combo.setFixedWidth(DROPDOWN_MAX_WIDTH)\n",
         "test_dropdowns_shrink_below_cap_when_column_is_narrower",
-        "assert view._model_combo.width() < DROPDOWN_MAX_WIDTH",
+        "assert view._protocol_combo.width() < 480",
     ),
     (
         "disable_model_editability",
